@@ -1,0 +1,14 @@
+packages:
+  - 'apps/web'
+  - 'apps/worker'
+  - 'packages/*'
+
+# Native deps allowed to run install-time build scripts.
+# pnpm 11+ uses `allowBuilds` (not `onlyBuiltDependencies`).
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
+  '@tailwindcss/oxide': true
+  msw: true

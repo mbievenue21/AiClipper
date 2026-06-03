@@ -1,0 +1,63 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js build
+.next/
+out/
+.vercel/
+next-env.d.ts
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Database files
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Generated media (large) - keep folder, ignore contents
+data/videos/*
+!data/videos/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Remotion
+out/
+build/
+
+# Whisper model cache (large)
+.cache/
+models/
+
+# OAuth tokens (per-account)
+secrets/

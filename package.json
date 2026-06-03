@@ -1,0 +1,19 @@
+{
+  "name": "aiclipper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal AI tool to extract highlight clips from long-form video, with captions, thumbnails, and scheduled uploads.",
+  "packageManager": "pnpm@11.5.1",
+  "scripts": {
+    "dev": "concurrently -n web,worker -c blue,magenta \"pnpm dev:web\" \"pnpm dev:worker\"",
+    "dev:web": "pnpm --filter web dev",
+    "dev:worker": "pnpm --filter worker dev",
+    "build": "pnpm --filter web build",
+    "db:generate": "pnpm --filter web db:generate",
+    "db:migrate": "pnpm --filter web db:migrate",
+    "db:studio": "pnpm --filter web db:studio"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

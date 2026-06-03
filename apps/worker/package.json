@@ -1,0 +1,17 @@
+{
+  "name": "worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Python FastAPI worker (orchestrated via pnpm for monorepo consistency).",
+  "scripts": {
+    "dev": ".venv\\Scripts\\python -m uvicorn worker.main:app --reload --port 8000 --host 127.0.0.1",
+    "start": ".venv\\Scripts\\python -m uvicorn worker.main:app --port 8000 --host 127.0.0.1",
+    "setup": "python -m venv .venv && .venv\\Scripts\\pip install -e .",
+    "setup:ingest": ".venv\\Scripts\\pip install -e .[ingest]",
+    "setup:transcribe": ".venv\\Scripts\\pip install -e .[transcribe]",
+    "setup:analyze": ".venv\\Scripts\\pip install -e .[analyze]",
+    "setup:render": ".venv\\Scripts\\pip install -e .[render]",
+    "setup:upload": ".venv\\Scripts\\pip install -e .[upload]",
+    "lint": ".venv\\Scripts\\python -m ruff check ."
+  }
+}

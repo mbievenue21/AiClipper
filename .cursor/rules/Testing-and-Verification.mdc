@@ -1,0 +1,57 @@
+---
+alwaysApply: true
+---
+
+Before claiming a task is complete, verify the relevant part of the system.
+
+General verification:
+- Run the most relevant tests or commands available.
+- If tests cannot be run, explain why.
+- Check for TypeScript errors when editing web code.
+- Check for Python syntax/import errors when editing worker code.
+- Verify database schema changes on both Drizzle and SQLAlchemy sides.
+- Verify output files exist for media jobs.
+- Verify job status transitions for pipeline changes.
+
+For Next.js changes:
+- Confirm routes compile.
+- Confirm API routes validate inputs.
+- Confirm UI has loading, error, and empty states.
+- Confirm client/server boundaries are correct.
+
+For worker changes:
+- Confirm the job handler can be called.
+- Confirm job status moves through expected states.
+- Confirm errors are captured and stored.
+- Confirm downstream jobs are enqueued only after successful completion.
+
+For database changes:
+- Confirm Drizzle and SQLAlchemy schemas match.
+- Confirm table/column names are consistent.
+- Confirm foreign keys and timestamps are reasonable.
+- Confirm migrations or initialization logic are updated.
+
+For media changes:
+- Test with a small sample video if possible.
+- Verify FFmpeg commands produce expected files.
+- Verify paths are project-relative and cross-platform.
+- Verify generated files are not empty.
+
+For AI changes:
+- Validate AI output schemas.
+- Handle malformed model responses.
+- Check timestamp boundaries.
+- Do not store invalid highlight candidates.
+
+For publishing changes:
+- Verify OAuth ownership and token handling.
+- Verify scheduled jobs do not run too early.
+- Verify successful API responses before marking upload complete.
+
+When fixing a bug:
+1. Identify the root cause.
+2. Make the smallest safe fix.
+3. Verify the fix.
+4. Explain what was verified.
+
+Do not say "done" or "complete" unless verification was performed or the limitation is clearly stated.

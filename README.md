@@ -52,41 +52,62 @@ AiClipper/
 
 ## Quick start
 
-> First-time setup: see [SETUP.md](#setup) below.
-
 ```powershell
-# install JS deps
+# From the repo root
 pnpm install
 
-# create Python venv and install deps (one-time)
-cd apps/worker
-python -m venv .venv
-.venv\Scripts\pip install -e .
-cd ../..
+# Python worker venv + ingest extras (yt-dlp Python package)
+pnpm --filter worker run setup
+pnpm --filter worker run setup:ingest
 
-# create your .env from the template, then edit
+# System tools for ingest (must be on PATH — see Setup below)
+#   yt-dlp, ffmpeg, ffprobe
+
 Copy-Item .env.example .env
-
-# initialize the database
 pnpm db:migrate
-
-# run both services in one terminal
 pnpm dev
 ```
 
-Open <http://localhost:3000> in your browser.
+Open <http://localhost:3000>, click **New project**, paste a YouTube or Twitch VOD URL, and watch the project page while the worker downloads the video.
+
+Worker health check: <http://127.0.0.1:8000/health> — expect `"ingest": true` in `capabilities` and `"ingest"` in `registered_handlers`.
 
 ## Setup
 
-### Prerequisites (already installed during bootstrap)
+### Prerequisites
 
-- Node.js 24 LTS
-- Python 3.11
-- FFmpeg 8.x
-- yt-dlp
-- Git
-- pnpm 11+
-- NVIDIA GPU with current drivers (for local Whisper)
+| Tool | Used for |
+|------|----------|
+| Node.js 22+ (LTS) | Next.js, pnpm |
+| pnpm 11+ | Monorepo scripts |
+| Python 3.11 | Worker |
+| **yt-dlp** | Download source video (Step 5) |
+| **ffmpeg** + **ffprobe** | Merge/probe video, extract audio (Step 5+) |
+| Git | Version control |
+| NVIDIA GPU + drivers (optional) | Local Whisper in Step 6 |
+
+Install **yt-dlp** and **FFmpeg** on Windows (pick one):
+
+```powershell
+winget install yt-dlp.yt-dlp
+winget install Gyan.FFmpeg
+```
+
+After install, ensure their `bin` folders are on your user **PATH**, then open a **new** terminal and verify:
+
+```powershell
+yt-dlp --version
+ffmpeg -version
+ffprobe -version
+```
+
+### Windows notes
+
+- **pnpm**: If `pnpm` is not recognized, add `C:\Program Files\nodejs` and `%APPDATA%\npm` to your user PATH.
+- **PowerShell scripts**: If `pnpm` fails with an execution-policy error, run once:  
+  `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+- **Python**: Use `pnpm --filter worker run setup` (not bare `python`) so the venv is created via the `py` launcher. The worker `setup` script uses `py -3 -m venv`.
+- **Ports**: Stop any old `pnpm dev` with `Ctrl+C` before restarting. If port 3000 or 8000 is stuck, kill orphaned `node` / `python` processes from a previous dev session.
 
 ### Required API keys
 
@@ -103,8 +124,36 @@ Open <http://localhost:3000> in your browser.
 - [x] Step 2 — Next.js scaffold (Tailwind, shadcn/ui, project list)
 - [x] Step 3 — Drizzle schema + SQLite migration (11 tables, FK cascades)
 - [x] Step 4 — Python FastAPI worker (job loop, SQLAlchemy mirror, health endpoint)
-- [ ] Step 5 — End-to-end ingest pipeline (yt-dlp download)
+- [x] Step 5 — End-to-end ingest pipeline (yt-dlp download)
 - [ ] Step 6 — Transcription stage (faster-whisper local GPU)
+
+### Step 5 — What works today
+
+1. **Web**: `/projects/new` — paste a YouTube or Twitch URL → creates a `projects` row and enqueues an `ingest` job on the worker.
+2. **Worker**: Downloads with yt-dlp to `data/videos/{project_id}/source.mp4`, probes metadata with ffprobe, extracts `audio.wav` (16 kHz mono for transcription), writes a `videos` row.
+3. **Web**: `/projects/{id}` — live job progress (page refresh while running) and source file metadata when complete.
+
+Ingest outputs per project:
+
+```
+data/videos/{project_id}/
+  source.mp4    # merged source video
+  audio.wav     # mono 16 kHz for Step 6
+```
+
+### Verify Step 5
+
+```powershell
+# Handler registered (no network)
+cd apps\worker
+.venv\Scripts\python scripts\smoke_ingest.py
+
+# Full stack
+pnpm dev
+# → http://localhost:3000/projects/new → short public YouTube URL
+# → confirm files under data/videos/{id}/ and job status succeeded in UI or:
+pnpm db:studio
+```
 - [ ] Step 7 — Highlight analysis (audio + chat + Gemini Flash)
 - [ ] Step 8 — Clip rendering (FFmpeg, scene snapping, vertical reformat)
 - [ ] Step 9 — Captions (Remotion overlay)

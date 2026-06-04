@@ -1,0 +1,43 @@
+---
+globs: apps/web/**/*.ts, apps/web/**/*.tsx
+alwaysApply: false
+---
+
+Use these rules for the apps/web Next.js application.
+
+Framework:
+- Use Next.js 15 App Router patterns.
+- Use TypeScript for all new web files.
+- Prefer Server Components by default.
+- Use "use client" only when browser APIs, event handlers, local state, or real-time UI behavior are required.
+- Use Server Actions or API routes where appropriate.
+- Keep long-running work out of web requests.
+
+UI:
+- Use Tailwind CSS and shadcn/ui.
+- Keep UI components in apps/web/components.
+- Keep shared utilities in apps/web/lib.
+- Handle loading, error, empty, and success states.
+- Make job progress visible to users.
+- For video/project detail pages, prioritize clarity: source video status, transcript status, highlights, generated clips, and job history.
+
+API routes:
+- POST /api/projects should create a project row and enqueue an ingest job.
+- Job creation should happen in the database, not in memory.
+- API routes should return quickly.
+- API routes must never download, transcribe, analyze, or render long videos directly.
+- Validate all incoming request bodies.
+- Validate ownership/access before returning project, job, clip, or account data.
+- Return structured JSON errors.
+
+SSE:
+- Use Server-Sent Events for live job status.
+- SSE should stream job/project status changes from the database.
+- Keep SSE responses lightweight.
+- Include fallback behavior if SSE disconnects.
+
+Do not:
+- Store raw video data in React state.
+- Store large media files in the database.
+- Expose API keys or OAuth secrets to client components.
+- Put Python worker logic in the Next.js app.

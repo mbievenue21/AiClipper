@@ -1,0 +1,61 @@
+---
+globs: apps/worker/**/*.py
+alwaysApply: false
+---
+
+Use these rules for the Python FastAPI worker in apps/worker.
+
+Worker responsibilities:
+- Poll the SQLite jobs table.
+- Claim queued jobs safely.
+- Execute job handlers by type.
+- Update job status, progress, and error fields.
+- Enqueue the next job in the pipeline.
+- Expose a health endpoint through FastAPI.
+- Never depend on in-memory job state as the source of truth.
+
+Job pipeline:
+1. ingest
+2. transcribe
+3. analyze
+4. render
+5. publish
+
+Job behavior:
+- A job must move from queued to running before execution.
+- A successful job must move to succeeded.
+- A failed job must move to failed with a useful error message.
+- Job handlers should be idempotent where practical.
+- Avoid duplicate downstream jobs.
+- Use attempts and run_after for retryable failures.
+- Log meaningful progress messages.
+- Store progress as a number when practical.
+- Do not swallow exceptions silently.
+
+Python style:
+- Use typed function signatures.
+- Use pathlib.Path for filesystem paths.
+- Keep job handlers in worker/jobs/.
+- Keep AI clients in worker/ai/.
+- Keep media helpers in worker/media/.
+- Keep database/session logic in worker/db.py.
+- Keep handlers focused. Do not put all logic in main.py.
+
+FastAPI:
+- main.py may start the API and worker loop.
+- Keep the health endpoint simple.
+- Long-running work should happen in the worker loop, not inside request handlers.
+
+Filesystem:
+Each project should use:
+
+data/videos/{project_id}/source.mp4
+data/videos/{project_id}/audio.wav
+data/videos/{project_id}/clips/
+data/videos/{project_id}/thumbnails/
+
+Do not:
+- Load entire large video files into memory.
+- Use shell commands with unsanitized user input.
+- Assume yt-dlp, FFmpeg, or external APIs are always available.
+- Claim a job succeeded if expected output files were not created.

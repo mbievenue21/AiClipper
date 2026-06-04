@@ -8,14 +8,17 @@ Reads/writes the same SQLite file as the Next.js app (`../../data/app.db`).
 ## Setup
 
 ```powershell
-# from the repo root
-pnpm --filter worker setup
+# From the repo root (`setup` is a pnpm script — use `run` to avoid the built-in `pnpm setup` command)
+pnpm --filter worker run setup
+pnpm --filter worker run setup:ingest
 ```
 
-This creates `.venv` and installs the core dependencies. Heavy ML/video
-deps are split into extras (`[transcribe]`, `[analyze]`, `[render]`, …)
-and only installed when their pipeline step is enabled — see the
-`setup:*` scripts in `package.json`.
+This creates `.venv`, installs core FastAPI/SQLAlchemy deps, then the `[ingest]` extra (`yt-dlp`, `ffmpeg-python`).
+
+**Step 5 (ingest)** also requires system **`yt-dlp`**, **`ffmpeg`**, and **`ffprobe`** on your PATH (see root README for `winget` install).
+
+Other heavy deps stay in optional extras (`[transcribe]`, `[analyze]`, …)
+until those pipeline steps are enabled — see `setup:*` in `package.json`.
 
 ## Running
 

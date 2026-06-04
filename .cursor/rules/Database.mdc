@@ -1,0 +1,89 @@
+---
+globs: apps/web/lib/schema.ts, apps/web/lib/db.ts, apps/worker/worker/db.py, **/migrations/**, **/*.sql
+alwaysApply: false
+---
+
+The MVP database is SQLite located at:
+
+data/app.db
+
+The web app uses Drizzle.
+The Python worker uses SQLAlchemy.
+Both layers must represent the same schema.
+
+When changing schema:
+- Update Drizzle schema in apps/web/lib/schema.ts.
+- Update SQLAlchemy models in apps/worker/worker/db.py.
+- Keep table names and column names consistent across TypeScript and Python.
+- Update migrations or initialization logic if present.
+- Do not update only one side.
+
+Core tables should include:
+- projects
+- jobs
+- transcripts
+- transcript_words or equivalent word timestamp storage
+- chat_messages or parsed chat event storage
+- highlights
+- clips
+- accounts
+- publishing_jobs or publishing-related job records if needed
+
+Recommended project fields:
+- id
+- source_url
+- source_platform
+- title
+- status
+- source_video_path
+- source_audio_path
+- created_at
+- updated_at
+
+Recommended job fields:
+- id
+- project_id
+- type
+- status
+- progress
+- message
+- error
+- attempts
+- run_after
+- started_at
+- finished_at
+- created_at
+- updated_at
+
+Allowed job types:
+- ingest
+- transcribe
+- analyze
+- render
+- publish
+
+Recommended job statuses:
+- queued
+- running
+- succeeded
+- failed
+- canceled
+
+Timestamp rules:
+- Store media timestamps consistently.
+- Prefer milliseconds for internal clip/highlight boundaries.
+- Convert to human-readable time only in UI.
+- Transcript words should preserve precise start/end timestamps.
+
+Media storage rules:
+- Store file paths in SQLite.
+- Store actual media files under data/videos/{project_id}/.
+- Do not store binary video/audio/image files in SQLite.
+
+Data integrity:
+- Use foreign keys where possible.
+- Jobs should reference projects.
+- Highlights should reference projects.
+- Clips should reference projects and optionally source highlights.
+- Accounts should reference users if auth is added.
+- Avoid destructive schema changes without a migration plan.

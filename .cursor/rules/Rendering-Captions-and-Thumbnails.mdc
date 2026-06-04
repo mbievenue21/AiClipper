@@ -1,0 +1,51 @@
+---
+globs: packages/remotion/**/*.tsx, apps/worker/worker/jobs/render.py, apps/worker/worker/media/**/*.py
+alwaysApply: false
+---
+
+Use these rules for clip generation, Remotion captions, vertical formatting, and thumbnails.
+
+Clip rendering:
+- Render clips from approved highlight candidates or user-selected start/end times.
+- Use FFmpeg to cut source.mp4 into clip.mp4.
+- Store clips under data/videos/{project_id}/clips/.
+- Store clip metadata in the clips table.
+- Verify rendered files exist before updating the database as complete.
+
+Clip timing:
+- Store start/end timestamps in milliseconds.
+- Keep clip duration within user-requested size when practical.
+- Supported target lengths may include 30 seconds, 60 seconds, and custom ranges.
+- When snapping to scene boundaries, preserve the clip's narrative context.
+
+Aspect ratios:
+- Support original aspect ratio.
+- Support 9:16 vertical short-form format.
+- Later support 1:1 if needed.
+- Do not crop important visual content carelessly.
+
+Captions:
+- Use transcript word timestamps to render captions.
+- Captions should be editable before final render when possible.
+- Remotion should handle caption overlays.
+- Caption styles should be parameterized, not hardcoded.
+- Support personalized caption styles over time.
+- Keep caption text readable on mobile.
+
+Remotion:
+- Keep Remotion components in packages/remotion.
+- Keep reusable caption rendering in Captions.tsx or focused subcomponents.
+- Avoid mixing database access into Remotion components.
+- Pass rendering data into Remotion through props or input files.
+
+Thumbnails:
+- Extract candidate frames from the clip or source video.
+- Compose thumbnails using Satori or another deterministic rendering method.
+- Store thumbnails under data/videos/{project_id}/thumbnails/.
+- Store thumbnail paths in the database.
+- Do not overwrite previous thumbnail variants unless explicitly intended.
+
+Do not:
+- Bake captions into the only copy of a clip if an uncaptioned version is still needed.
+- Hardcode caption style values throughout the codebase.
+- Generate thumbnails that misrepresent the clip content.

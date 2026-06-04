@@ -35,6 +35,15 @@ class JobRunner:
     async def start(self) -> None:
         if self._task is not None:
             return
+        # If a previous worker died mid-job (e.g. uvicorn --reload killed the
+        # child while it was running), the row is stuck as "running". Reset
+        # before we start polling so the job retries naturally.
+        try:
+            reset = queue.reset_stuck_running_jobs()
+            if reset:
+                log.info("reset_stuck_running_jobs", count=reset)
+        except Exception:
+            log.exception("reset_stuck_running_jobs_failed")
         self._stop_event.clear()
         self._task = asyncio.create_task(self._loop(), name="job-runner")
         log.info(

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": ".venv\\Scripts\\python -m uvicorn worker.main:app --reload --port 8000 --host 127.0.0.1",
     "start": ".venv\\Scripts\\python -m uvicorn worker.main:app --port 8000 --host 127.0.0.1",
-    "setup": "python -m venv .venv && .venv\\Scripts\\pip install -e .",
+    "setup": "py -3 -m venv .venv && .venv\\Scripts\\pip install -e .",
     "setup:ingest": ".venv\\Scripts\\pip install -e .[ingest]",
     "setup:transcribe": ".venv\\Scripts\\pip install -e .[transcribe]",
     "setup:analyze": ".venv\\Scripts\\pip install -e .[analyze]",

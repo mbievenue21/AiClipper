@@ -12,8 +12,16 @@ job execution share one process.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import sys
 from collections.abc import AsyncIterator
+
+# On Windows, uvicorn's reload mode can leave the worker on a SelectorEventLoop,
+# which cannot launch subprocesses (NotImplementedError in _make_subprocess_transport).
+# Force the Proactor policy so any code that does use asyncio subprocess still works.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import uvicorn
 from fastapi import FastAPI
@@ -21,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api import health as health_api
 from .api import jobs as jobs_api
+from . import jobs as _jobs  # noqa: F401 — register handlers
 from .jobs.runner import runner
 from .logging import configure_logging, get_logger
 

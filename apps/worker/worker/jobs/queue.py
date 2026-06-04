@@ -4,15 +4,10 @@ A "job" is a unit of work the worker will execute (ingest, transcribe, etc.).
 Both the Next.js app and the worker itself can enqueue jobs; only the worker
 claims and runs them.
 
-Claiming is done in a transaction:
-    BEGIN IMMEDIATE
-    SELECT id FROM jobs WHERE status='pending' AND ... LIMIT 1
-    UPDATE jobs SET status='running', started_at=? WHERE id=?
-    COMMIT
-
-SQLite + WAL gives us atomic claim semantics for a single worker. (For
-multi-worker setups we'd switch to Postgres or add SELECT ... FOR UPDATE,
-but for personal use one worker is correct and simplest.)
+Claiming uses a SINGLE statement: `UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING id`.
+SQLite executes that as one atomic operation, so even when two worker processes
+overlap (e.g. uvicorn --reload spawning a new child before the old one exits),
+they can never both claim the same row.
 """
 
 from __future__ import annotations
@@ -20,10 +15,32 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import text, update
 
 from ..db import session_scope
 from ..models import Job
+
+_CLAIM_SQL = text(
+    """
+    UPDATE jobs
+    SET status = 'running',
+        started_at = :now,
+        attempts = attempts + 1,
+        progress = 0.0,
+        progress_message = 'starting'
+    WHERE id = (
+      SELECT id FROM jobs
+      WHERE status = 'pending'
+        AND (
+          depends_on_job_id IS NULL
+          OR depends_on_job_id IN (SELECT id FROM jobs WHERE status = 'succeeded')
+        )
+      ORDER BY created_at ASC
+      LIMIT 1
+    )
+    RETURNING id
+    """
+)
 
 
 def _now_ms() -> int:
@@ -58,41 +75,35 @@ def enqueue(
 def claim_next() -> Job | None:
     """Atomically grab the next runnable job. Returns None if none are ready."""
     with session_scope() as session:
-        # Sub-query for jobs whose dependency (if any) is already succeeded.
-        ready_dep_subq = select(Job.id).where(
-            or_(
-                Job.depends_on_job_id.is_(None),
-                Job.depends_on_job_id.in_(
-                    select(Job.id).where(Job.status == "succeeded")
-                ),
-            )
-        )
-
-        next_job = session.execute(
-            select(Job)
-            .where(and_(Job.status == "pending", Job.id.in_(ready_dep_subq)))
-            .order_by(Job.created_at.asc())
-            .limit(1)
-        ).scalar_one_or_none()
-
-        if next_job is None:
+        row = session.execute(_CLAIM_SQL, {"now": _now_ms()}).first()
+        if row is None:
             return None
+        job = session.get(Job, row[0])
+        if job is None:
+            return None
+        session.expunge(job)
+        return job
 
-        session.execute(
+
+def reset_stuck_running_jobs() -> int:
+    """Reset any jobs left in `running` from a previous worker crash/restart.
+
+    Called at runner startup. With uvicorn --reload, the previous child process
+    can die mid-job, leaving the row stuck as `running`. Without this, the
+    job would never retry and the project would appear hung.
+    """
+    with session_scope() as session:
+        result = session.execute(
             update(Job)
-            .where(Job.id == next_job.id)
+            .where(Job.status == "running")
             .values(
-                status="running",
-                started_at=_now_ms(),
-                attempts=Job.attempts + 1,
+                status="pending",
                 progress=0.0,
-                progress_message="starting",
+                progress_message="reset after worker restart",
+                started_at=None,
             )
         )
-        session.flush()
-        session.refresh(next_job)
-        session.expunge(next_job)
-        return next_job
+        return result.rowcount or 0
 
 
 def update_progress(job_id: str, progress: float, message: str | None = None) -> None:

@@ -1,0 +1,37 @@
+---
+description: 
+alwaysApply: true
+---
+
+This project is `clipper`, an AI-powered long-form video clipping application.
+
+The core purpose is to let a user paste a YouTube/Twitch/VOD URL, process the long video, identify highlight candidates using transcript, audio, chat, scene, and AI signals, then let the user generate short-form clips with captions, thumbnails, and eventually scheduled publishing.
+
+Primary user flow:
+1. User pastes a video URL in the Next.js UI.
+2. POST /api/projects creates a project row and an ingest job.
+3. Python worker picks up jobs from SQLite.
+4. Worker runs ingest, transcribe, analyze, render, and publish stages.
+5. UI displays live job status through Server-Sent Events.
+6. User reviews highlights and generates clips.
+7. User may later schedule uploads to YouTube, TikTok, or other platforms.
+
+Current stack:
+- Monorepo: pnpm workspace
+- Frontend: Next.js 15 App Router, React, TypeScript
+- UI: Tailwind CSS and shadcn/ui
+- Database: SQLite for MVP
+- Web DB layer: Drizzle
+- Worker DB layer: SQLAlchemy
+- Worker: Python FastAPI app with job loop
+- Media: yt-dlp, FFmpeg, librosa, PySceneDetect
+- Transcription: Groq Whisper API or local faster-whisper
+- Analysis: Gemini 2.5 Flash
+- Captions/rendering: Remotion
+- Thumbnails: extracted video frame plus Satori composition
+- Local media storage: data/videos/{project_id}/
+
+Important product principle:
+The application should process long videos as a staged pipeline, not as one giant AI prompt.
+
+Do not redesign the architecture unless explicitly asked. Work within the planned structure unless there is a strong reason to suggest a change.

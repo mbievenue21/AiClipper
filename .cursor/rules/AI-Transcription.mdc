@@ -1,0 +1,68 @@
+---
+globs: apps/worker/worker/ai/**/*.py, apps/worker/worker/jobs/transcribe.py, apps/worker/worker/jobs/analyze.py
+alwaysApply: false
+---
+
+Use these rules for Whisper, Gemini, transcript processing, highlight ranking, and AI output validation.
+
+Transcription stage:
+- Use Groq Whisper API or local faster-whisper depending on configuration.
+- Extract transcript from audio.wav.
+- Preserve segment-level timestamps.
+- Preserve word-level timestamps when available.
+- Store transcript data in SQLite.
+- After transcription succeeds, enqueue an analyze job.
+- Do not proceed to analysis if transcript generation failed.
+
+Analysis stage:
+- Combine multiple signals to find highlight candidates:
+  - transcript content
+  - word timestamps
+  - audio energy
+  - chat density
+  - scene boundaries
+  - streamer reactions when available
+  - viewer or engagement data if available later
+
+Annotated transcript format should include timestamped signal context, for example:
+
+[t=01:23:45 | chat=87 msg/s | audio_db=-12 | scene_cut]
+"And then I realized the dragon was actually..."
+
+Gemini usage:
+- Use Gemini 2.5 Flash for highlight candidate generation.
+- Send structured, timestamped context.
+- Ask for JSON output only.
+- Validate the returned JSON before storing it.
+- If JSON is invalid, attempt one repair/retry before failing the job.
+- Never blindly trust AI output.
+
+Expected highlight JSON shape:
+
+[
+  {
+    "start": "01:23:20",
+    "end": "01:24:10",
+    "score": 92,
+    "title": "The Dragon Reveal",
+    "reason": "Strong setup and payoff with chat spike and streamer reaction."
+  }
+]
+
+Storage:
+- Convert AI timestamps into internal milliseconds before storing.
+- Store highlight candidates in the highlights table.
+- Store AI reason, title, score, and source signals where possible.
+- Keep highlights separate from finalized clips.
+
+Quality rules:
+- Highlight clips should have a clear hook, context, payoff, or reaction.
+- Prefer moments that can stand alone as 30-90 second clips.
+- Avoid selecting moments that require too much missing context.
+- Do not create highlights from copyrighted/third-party content unless the user owns or is authorized to process it.
+
+Do not:
+- Send the entire 5-hour VOD directly to a model.
+- Send unnecessarily huge prompts when chunking or summarization would work.
+- Store raw API responses without validation.
+- Let AI create clip boundaries outside the source video duration.

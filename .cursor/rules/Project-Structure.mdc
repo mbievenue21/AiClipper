@@ -1,0 +1,63 @@
+---
+description: 
+alwaysApply: true
+---
+
+Expected project structure:
+
+clipper/
+├── apps/
+│   ├── web/
+│   │   ├── app/
+│   │   ├── components/
+│   │   ├── lib/
+│   │   │   ├── db.ts
+│   │   │   └── schema.ts
+│   │   └── package.json
+│   └── worker/
+│       ├── worker/
+│       │   ├── main.py
+│       │   ├── jobs/
+│       │   ├── ai/
+│       │   ├── media/
+│       │   └── db.py
+│       ├── pyproject.toml
+│       └── README.md
+├── packages/
+│   └── remotion/
+├── data/
+│   ├── app.db
+│   └── videos/
+├── .env.example
+├── docker-compose.yml
+├── package.json
+└── README.md
+
+General development rules:
+- Read relevant files before editing.
+- Prefer small, incremental changes over large rewrites.
+- Preserve the staged build sequence.
+- Do not introduce unnecessary frameworks or services.
+- Do not move files away from the planned monorepo structure without explaining why.
+- Use clear names that match the pipeline stages: ingest, transcribe, analyze, render, publish.
+- Do not hardcode absolute local paths.
+- Use project-relative paths.
+- Use cross-platform path handling because development may happen on Windows.
+- Keep .env.example updated when adding new environment variables.
+- Do not put secrets, API keys, OAuth tokens, or signed URLs in code.
+- When adding a new feature, update the README or relevant comments if setup behavior changes.
+
+Preferred implementation sequence:
+1. Bootstrap workspace and tooling.
+2. Define database schema.
+3. Build Next.js scaffold.
+4. Build Python worker scaffold.
+5. Implement ingest.
+6. Implement transcription.
+7. Implement analysis.
+8. Implement render.
+9. Implement captions.
+10. Implement thumbnails.
+11. Implement SSE progress.
+12. Implement YouTube OAuth/publishing.
+13. Implement TikTok last.

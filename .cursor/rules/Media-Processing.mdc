@@ -1,0 +1,47 @@
+---
+globs: apps/worker/worker/media/**/*.py, apps/worker/worker/jobs/ingest.py, apps/worker/worker/jobs/render.py
+alwaysApply: false
+---
+
+Use these rules for yt-dlp, FFmpeg, audio processing, scene detection, and file generation.
+
+Ingest stage:
+- Given a project source URL, use yt-dlp to download source.mp4.
+- Store the video at data/videos/{project_id}/source.mp4.
+- Attempt to download chat replay JSON when available for Twitch/YouTube live sources.
+- Store chat replay data under the project directory.
+- Extract audio with FFmpeg to audio.wav.
+- Verify output files exist before marking ingest as succeeded.
+- After ingest succeeds, enqueue a transcribe job.
+
+FFmpeg:
+- Use wrapper functions for FFmpeg commands.
+- Prefer explicit input/output paths.
+- Use subprocess.run safely with argument arrays, not shell string concatenation.
+- Capture stderr for debugging.
+- Do not log secrets, signed URLs, or OAuth tokens.
+- Check return codes.
+- Validate that output files exist and are non-empty.
+
+Audio analysis:
+- Use librosa or another reliable audio library to compute audio energy per second.
+- Store or return timestamped energy values.
+- Avoid loading extremely large audio files all at once if avoidable.
+
+Scene detection:
+- Use PySceneDetect for scene boundaries.
+- Store scene boundaries with timestamps.
+- Clip start/end times may be snapped to nearby scene boundaries when rendering.
+- Do not snap so aggressively that the clip loses context.
+
+Rendering:
+- FFmpeg should cut from the original source.mp4.
+- Support 16:9 original output and 9:16 vertical output.
+- For vertical output, preserve the subject/content as much as possible.
+- Keep rendering deterministic from stored clip parameters.
+- Do not overwrite the original source video.
+
+Media paths:
+- Store source files, rendered clips, thumbnails, and captions in the project media directory.
+- Store paths in the database.
+- Do not store large binary media in SQLite.

@@ -125,7 +125,7 @@ ffprobe -version
 - [x] Step 3 — Drizzle schema + SQLite migration (11 tables, FK cascades)
 - [x] Step 4 — Python FastAPI worker (job loop, SQLAlchemy mirror, health endpoint)
 - [x] Step 5 — End-to-end ingest pipeline (yt-dlp download)
-- [ ] Step 6 — Transcription stage (faster-whisper local GPU)
+- [x] Step 6 — Transcription stage (faster-whisper local GPU)
 
 ### Step 5 — What works today
 
@@ -154,6 +154,54 @@ pnpm dev
 # → confirm files under data/videos/{id}/ and job status succeeded in UI or:
 pnpm db:studio
 ```
+
+### Step 6 — What works today
+
+After ingest finishes, the worker now auto-enqueues a **transcribe** job that
+runs faster-whisper against `audio.wav` and writes the result to the
+`transcripts` + `transcript_segments` tables.
+
+- **Backend selection:** auto-picks CUDA if available, otherwise CPU + int8.
+- **Word timestamps:** stored as JSON on each segment for karaoke captions (Step 9) and snap-to-word clip cutting (Step 8).
+- **VAD filter:** silence is skipped, so long VODs transcribe faster.
+- **Model cache:** the loaded WhisperModel is reused across jobs in the same worker process (load ≈ 30 s for `large-v3`).
+- **Project status:** flips `pending → ingesting → pending → transcribing → ready`. Step 7 will insert an `analyzing` stage between transcribing and ready.
+
+What lands in the DB after a successful transcribe:
+
+```text
+transcripts        1 row per video  (language, model, full_text)
+transcript_segments  N rows         (start_seconds, end_seconds, text, words_json)
+```
+
+### Install Step 6
+
+```powershell
+pnpm --filter worker run setup:transcribe   # installs faster-whisper + ctranslate2
+```
+
+**GPU notes (Windows):** faster-whisper needs cuBLAS and cuDNN at runtime.
+If you installed the CUDA Toolkit those DLLs are already on PATH. If you
+don't have them, the worker falls back to CPU + int8 automatically — slower
+but still works. To force CPU explicitly, set `WHISPER_COMPUTE_TYPE=int8`
+in `.env`.
+
+**First run downloads model weights** to `~/.cache/huggingface/hub/` (~3 GB
+for `large-v3`, ~470 MB for `small`). Override `WHISPER_MODEL=small` in `.env`
+for much faster initial setup with very usable quality.
+
+### Verify Step 6
+
+```powershell
+# Handler registered + faster-whisper imports + device detection (no model load)
+cd apps\worker
+.venv\Scripts\python scripts\smoke_transcribe.py
+```
+
+End-to-end: submit a short YouTube URL in the UI and watch the project page.
+You should see the **Ingest** job complete, then a **Transcribe** job appear
+and progress to 100 %, and finally a **Transcript** card with the language,
+segment count, and a preview of the full text.
 - [ ] Step 7 — Highlight analysis (audio + chat + Gemini Flash)
 - [ ] Step 8 — Clip rendering (FFmpeg, scene snapping, vertical reformat)
 - [ ] Step 9 — Captions (Remotion overlay)

@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { formatDistanceToNow } from "date-fns";
-import { ArrowLeft, FileVideo } from "lucide-react";
+import { ArrowLeft, FileText, FileVideo } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,6 +29,14 @@ const statusVariants: Record<
   analyzing: "secondary",
   ready: "default",
   failed: "destructive",
+};
+
+const JOB_LABELS: Record<string, string> = {
+  ingest: "Ingest",
+  transcribe: "Transcribe",
+  analyze: "Analyze",
+  render: "Render",
+  publish: "Publish",
 };
 
 function formatBytes(n: number | null | undefined): string {
@@ -78,20 +86,52 @@ export default async function ProjectPage({ params }: PageProps) {
     .orderBy(desc(schema.jobs.createdAt))
     .limit(10);
 
-  const ingestJob = jobs.find((j) => j.type === "ingest");
-  const jobActive =
-    ingestJob?.status === "pending" || ingestJob?.status === "running";
   const video = videos[0];
 
-  const ingestComplete = Boolean(video) && project.status !== "ingesting";
-  const statusLabel =
-    project.status === "pending" && video
-      ? "downloaded"
-      : project.status;
+  const transcript = video
+    ? (
+        await db
+          .select({
+            id: schema.transcripts.id,
+            videoId: schema.transcripts.videoId,
+            language: schema.transcripts.language,
+            model: schema.transcripts.model,
+            fullText: schema.transcripts.fullText,
+            createdAt: schema.transcripts.createdAt,
+            segmentCount: sql<number>`
+              (SELECT COUNT(*) FROM transcript_segments
+               WHERE transcript_segments.transcript_id = transcripts.id)
+            `.as("segment_count"),
+          })
+          .from(schema.transcripts)
+          .where(eq(schema.transcripts.videoId, video.id))
+          .limit(1)
+      )[0] ?? null
+    : null;
+
+  // Latest job of each type (jobs are ordered newest first above).
+  const latestByType = new Map<string, (typeof jobs)[number]>();
+  for (const j of jobs) if (!latestByType.has(j.type)) latestByType.set(j.type, j);
+
+  const anyJobActive = jobs.some(
+    (j) => j.status === "pending" || j.status === "running",
+  );
+  const pipelineActive =
+    anyJobActive ||
+    project.status === "ingesting" ||
+    project.status === "transcribing" ||
+    project.status === "analyzing";
+
+  const statusLabel = (() => {
+    if (project.status === "pending" && transcript) return "transcribed";
+    if (project.status === "pending" && video) return "downloaded";
+    if (project.status === "ready" && transcript) return "transcribed";
+    return project.status;
+  })();
 
   return (
     <div className="container mx-auto max-w-3xl px-4 py-10">
-      <RefreshWhenRunning active={jobActive || project.status === "ingesting"} />
+      <RefreshWhenRunning active={pipelineActive} />
 
       <Button variant="ghost" size="sm" className="mb-6 -ml-2" asChild>
         <Link href="/">
@@ -114,33 +154,34 @@ export default async function ProjectPage({ params }: PageProps) {
         </Badge>
       </div>
 
-      {ingestJob && (
-        <Card className="mb-4">
+      {/* Job cards: most recent first */}
+      {Array.from(latestByType.values()).map((j) => (
+        <Card key={j.id} className="mb-4">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base">Ingest job</CardTitle>
+            <CardTitle className="text-base">
+              {JOB_LABELS[j.type] ?? j.type} job
+            </CardTitle>
             <CardDescription>
-              {ingestJob.status}
-              {ingestJob.progressMessage
-                ? ` — ${ingestJob.progressMessage}`
-                : null}
+              {j.status}
+              {j.progressMessage ? ` — ${j.progressMessage}` : null}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
-            <Progress value={Math.round(ingestJob.progress * 100)} />
+            <Progress value={Math.round(j.progress * 100)} />
             <p className="text-xs text-muted-foreground">
-              {Math.round(ingestJob.progress * 100)}% · job {ingestJob.id}
+              {Math.round(j.progress * 100)}% · job {j.id}
             </p>
-            {ingestJob.errorMessage && (
+            {j.errorMessage && (
               <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap">
-                {ingestJob.errorMessage}
+                {j.errorMessage}
               </pre>
             )}
           </CardContent>
         </Card>
-      )}
+      ))}
 
       {video ? (
-        <Card>
+        <Card className="mb-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <FileVideo className="size-4" />
@@ -195,8 +236,7 @@ export default async function ProjectPage({ params }: PageProps) {
           </CardContent>
         </Card>
       ) : (
-        !jobActive &&
-        project.status !== "ingesting" && (
+        !pipelineActive && (
           <Card className="border-dashed">
             <CardContent className="py-8 text-center text-sm text-muted-foreground">
               No video file yet.
@@ -205,11 +245,39 @@ export default async function ProjectPage({ params }: PageProps) {
         )
       )}
 
-      {ingestComplete && project.status === "pending" && (
-        <p className="mt-6 text-sm text-muted-foreground">
-          Download complete. Step 6 (transcription) will pick up from the audio
-          file above.
-        </p>
+      {transcript && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileText className="size-4" />
+              Transcript
+            </CardTitle>
+            <CardDescription>
+              {[
+                transcript.language?.toUpperCase(),
+                `${transcript.segmentCount} segments`,
+                transcript.model,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {transcript.fullText ? (
+              <div className="max-h-48 overflow-auto rounded-md bg-muted p-3 text-sm whitespace-pre-wrap leading-relaxed">
+                {transcript.fullText.length > 1200
+                  ? transcript.fullText.slice(0, 1200) + "…"
+                  : transcript.fullText}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No text extracted.</p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Step 7 (highlight analysis) will use these segments + word-level
+              timings to pick clip candidates.
+            </p>
+          </CardContent>
+        </Card>
       )}
 
       {project.notes && project.status === "failed" && (

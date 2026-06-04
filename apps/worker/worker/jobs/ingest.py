@@ -33,6 +33,7 @@ from ..media.ffmpeg_util import extract_mono_wav
 from ..media.paths import project_dir, rel_path
 from ..media.probe import probe_video
 from ..models import Project, Video
+from . import queue
 from .handlers import ProgressReporter, register
 
 log = structlog.get_logger(__name__)
@@ -259,6 +260,15 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
             session.refresh(video)
             video_id = video.id
 
+        # Chain Step 6: hand off to the transcribe job.
+        # We enqueue here (not via depends_on) because ingest is already done;
+        # the new job is immediately eligible to be claimed.
+        next_job = queue.enqueue(
+            "transcribe",
+            {"project_id": project_id, "video_id": video_id},
+            project_id=project_id,
+        )
+
         progress(1.0, "ingest complete")
         log.info(
             "ingest_done",
@@ -266,6 +276,7 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
             video_id=video_id,
             file_path=rel_video,
             media_root=str(settings.media_root_path),
+            next_job_id=next_job.id,
         )
         return {
             "video_id": video_id,
@@ -273,6 +284,7 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
             "audio_path": rel_audio,
             "chat_json_path": rel_chat,
             "duration_seconds": meta.duration_seconds,
+            "next_job_id": next_job.id,
         }
 
     except Exception as exc:

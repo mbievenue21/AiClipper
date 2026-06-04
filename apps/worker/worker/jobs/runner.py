@@ -44,6 +44,17 @@ class JobRunner:
                 log.info("reset_stuck_running_jobs", count=reset)
         except Exception:
             log.exception("reset_stuck_running_jobs_failed")
+
+        # Same idea for projects: if we crashed between INSERT project and
+        # POST /jobs, the project row sits in pending/ingesting/etc. forever
+        # with no active job. Mark those as failed so the UI shows the
+        # truth and the user can move on.
+        try:
+            healed = queue.heal_orphan_projects()
+            if healed:
+                log.info("heal_orphan_projects", count=healed)
+        except Exception:
+            log.exception("heal_orphan_projects_failed")
         self._stop_event.clear()
         self._task = asyncio.create_task(self._loop(), name="job-runner")
         log.info(

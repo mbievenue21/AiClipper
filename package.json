@@ -11,7 +11,9 @@
     "build": "pnpm --filter web build",
     "db:generate": "pnpm --filter web db:generate",
     "db:migrate": "pnpm --filter web db:migrate",
-    "db:studio": "pnpm --filter web db:studio"
+    "db:studio": "pnpm --filter web db:studio",
+    "worker:reset": "pnpm --filter worker run reset",
+    "worker:reset:dry": "pnpm --filter worker run reset:dry"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

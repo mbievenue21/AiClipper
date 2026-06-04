@@ -27,6 +27,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api import admin as admin_api
 from .api import health as health_api
 from .api import jobs as jobs_api
 from . import jobs as _jobs  # noqa: F401 — register handlers
@@ -65,6 +66,7 @@ app.add_middleware(
 
 app.include_router(health_api.router)
 app.include_router(jobs_api.router)
+app.include_router(admin_api.router)
 
 
 def run_cli() -> None:

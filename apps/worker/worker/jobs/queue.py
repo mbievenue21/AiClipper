@@ -106,6 +106,46 @@ def reset_stuck_running_jobs() -> int:
         return result.rowcount or 0
 
 
+_HEAL_ORPHAN_PROJECTS_SQL = text(
+    """
+    UPDATE projects
+    SET status = 'failed',
+        notes  = COALESCE(NULLIF(notes,''), '') ||
+                 CASE WHEN notes IS NULL OR notes = '' THEN '' ELSE char(10) END ||
+                 :note,
+        updated_at = :now
+    WHERE id IN (
+      SELECT p.id FROM projects p
+      LEFT JOIN jobs j ON j.project_id = p.id
+      WHERE p.status IN ('pending','ingesting','transcribing','analyzing')
+      GROUP BY p.id
+      HAVING SUM(CASE WHEN j.status IN ('pending','running') THEN 1 ELSE 0 END) = 0
+         AND SUM(CASE WHEN j.status = 'succeeded' THEN 1 ELSE 0 END) = 0
+    )
+    """
+)
+
+
+def heal_orphan_projects() -> int:
+    """Mark projects stuck mid-pipeline with no active jobs as ``failed``.
+
+    Called at runner startup. Covers the case where the worker died between
+    inserting a project and enqueueing the ingest job (or any later stage).
+    """
+    with session_scope() as session:
+        result = session.execute(
+            _HEAL_ORPHAN_PROJECTS_SQL,
+            {
+                "now": _now_ms(),
+                "note": (
+                    "Worker was unavailable when this stage ran. "
+                    "Delete this project and create a new one."
+                ),
+            },
+        )
+        return result.rowcount or 0
+
+
 def update_progress(job_id: str, progress: float, message: str | None = None) -> None:
     with session_scope() as session:
         session.execute(

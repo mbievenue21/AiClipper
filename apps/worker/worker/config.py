@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     whisper_compute_type: str = Field(
         default="float16", alias="WHISPER_COMPUTE_TYPE"
     )
+    # auto = use GPU only if cuBLAS is loadable; cpu = always CPU; cuda = require GPU
+    whisper_device: Literal["auto", "cuda", "cpu"] = Field(
+        default="auto", alias="WHISPER_DEVICE"
+    )
     groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
 
     # ---- AI: highlights / thumbnails -------------------------------------

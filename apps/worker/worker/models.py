@@ -34,6 +34,15 @@ def _to_dt(ms: int | None) -> datetime | None:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
+_DEFAULT_PROJECT_SETTINGS: dict[str, Any] = {
+    "topN": 3,
+    "minClipSeconds": 20,
+    "maxClipSeconds": 60,
+    "aspect": "9:16",
+    "vibe": "",
+}
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -43,6 +52,7 @@ class Project(Base):
     source_type: Mapped[str] = mapped_column(Text, nullable=False)  # youtube|twitch|upload
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     notes: Mapped[str | None] = mapped_column(Text)
+    settings_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
     updated_at: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
@@ -55,6 +65,21 @@ class Project(Base):
     @property
     def created_at_dt(self) -> datetime:
         return _to_dt(self.created_at)  # type: ignore[return-value]
+
+    @property
+    def settings(self) -> dict[str, Any]:
+        """Merge stored settings on top of defaults so callers always get a complete dict."""
+        out = dict(_DEFAULT_PROJECT_SETTINGS)
+        if self.settings_json:
+            try:
+                out.update(json.loads(self.settings_json))
+            except json.JSONDecodeError:
+                pass
+        return out
+
+    @settings.setter
+    def settings(self, value: dict[str, Any]) -> None:
+        self.settings_json = json.dumps(value) if value is not None else None
 
 
 class Video(Base):

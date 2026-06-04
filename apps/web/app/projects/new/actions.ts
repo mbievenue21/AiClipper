@@ -4,12 +4,46 @@ import { eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
 
 import { db, schema } from "@/lib/db/client";
+import { DEFAULT_PROJECT_SETTINGS, type ProjectSettings } from "@/lib/db/schema";
 import { defaultProjectName, detectSourceType } from "@/lib/source-url";
 import { enqueueIngestJob } from "@/lib/worker";
 
 export type CreateProjectState = {
   error?: string;
 };
+
+function parseSettings(formData: FormData): ProjectSettings {
+  const raw = {
+    topN: Number(formData.get("topN") ?? DEFAULT_PROJECT_SETTINGS.topN),
+    minClipSeconds: Number(
+      formData.get("minClipSeconds") ?? DEFAULT_PROJECT_SETTINGS.minClipSeconds,
+    ),
+    maxClipSeconds: Number(
+      formData.get("maxClipSeconds") ?? DEFAULT_PROJECT_SETTINGS.maxClipSeconds,
+    ),
+    aspect: String(formData.get("aspect") ?? DEFAULT_PROJECT_SETTINGS.aspect),
+    vibe: String(formData.get("vibe") ?? "").trim(),
+  };
+
+  const topN = Math.max(1, Math.min(20, Math.floor(raw.topN || 3)));
+  let minClip = Math.max(5, Math.min(180, Math.floor(raw.minClipSeconds || 20)));
+  let maxClip = Math.max(10, Math.min(180, Math.floor(raw.maxClipSeconds || 60)));
+  if (maxClip < minClip) [minClip, maxClip] = [maxClip, minClip];
+
+  const aspect: ProjectSettings["aspect"] = (
+    ["9:16", "16:9", "1:1"] as const
+  ).includes(raw.aspect as ProjectSettings["aspect"])
+    ? (raw.aspect as ProjectSettings["aspect"])
+    : DEFAULT_PROJECT_SETTINGS.aspect;
+
+  return {
+    topN,
+    minClipSeconds: minClip,
+    maxClipSeconds: maxClip,
+    aspect,
+    vibe: raw.vibe.slice(0, 200),
+  };
+}
 
 export async function createProject(
   _prev: CreateProjectState,
@@ -30,6 +64,7 @@ export async function createProject(
   }
 
   const name = nameInput || defaultProjectName(sourceUrl);
+  const settings = parseSettings(formData);
 
   const [project] = await db
     .insert(schema.projects)
@@ -38,6 +73,7 @@ export async function createProject(
       sourceUrl,
       sourceType,
       status: "pending",
+      settingsJson: settings,
     })
     .returning();
 

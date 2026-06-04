@@ -1,8 +1,8 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useState } from "react";
 import Link from "next/link";
-import { Loader2 } from "lucide-react";
+import { ChevronDown, Loader2 } from "lucide-react";
 
 import { createProject, type CreateProjectState } from "./actions";
 import { Button } from "@/components/ui/button";
@@ -14,11 +14,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { DEFAULT_PROJECT_SETTINGS } from "@/lib/db/schema";
 
 const initial: CreateProjectState = {};
 
 export function CreateProjectForm() {
   const [state, action, pending] = useActionState(createProject, initial);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   return (
     <Card className="mx-auto max-w-lg">
@@ -26,7 +28,9 @@ export function CreateProjectForm() {
         <CardTitle>New project</CardTitle>
         <CardDescription>
           Paste a public YouTube or Twitch VOD URL. The worker will download it
-          with yt-dlp into <code className="text-xs">data/videos/</code>.
+          with yt-dlp into <code className="text-xs">data/videos/</code>,
+          transcribe it, and pick {DEFAULT_PROJECT_SETTINGS.topN} highlight clips
+          by default.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -55,6 +59,105 @@ export function CreateProjectForm() {
               disabled={pending}
             />
           </div>
+
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((v) => !v)}
+            className="flex w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm font-medium hover:bg-accent"
+            aria-expanded={advancedOpen}
+          >
+            <span>Advanced — clip settings</span>
+            <ChevronDown
+              className={`size-4 transition-transform ${advancedOpen ? "rotate-180" : ""}`}
+            />
+          </button>
+
+          {advancedOpen && (
+            <div className="space-y-3 rounded-md border border-dashed border-border p-3">
+              <div className="space-y-2">
+                <label htmlFor="topN" className="text-sm font-medium">
+                  Number of highlight clips
+                </label>
+                <Input
+                  id="topN"
+                  name="topN"
+                  type="number"
+                  min={1}
+                  max={20}
+                  defaultValue={DEFAULT_PROJECT_SETTINGS.topN}
+                  disabled={pending}
+                />
+                <p className="text-xs text-muted-foreground">
+                  How many candidate clips to extract from the video (1–20).
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-2">
+                  <label htmlFor="minClipSeconds" className="text-sm font-medium">
+                    Min length (s)
+                  </label>
+                  <Input
+                    id="minClipSeconds"
+                    name="minClipSeconds"
+                    type="number"
+                    min={5}
+                    max={120}
+                    defaultValue={DEFAULT_PROJECT_SETTINGS.minClipSeconds}
+                    disabled={pending}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="maxClipSeconds" className="text-sm font-medium">
+                    Max length (s)
+                  </label>
+                  <Input
+                    id="maxClipSeconds"
+                    name="maxClipSeconds"
+                    type="number"
+                    min={10}
+                    max={180}
+                    defaultValue={DEFAULT_PROJECT_SETTINGS.maxClipSeconds}
+                    disabled={pending}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="aspect" className="text-sm font-medium">
+                  Output aspect
+                </label>
+                <select
+                  id="aspect"
+                  name="aspect"
+                  defaultValue={DEFAULT_PROJECT_SETTINGS.aspect}
+                  disabled={pending}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="9:16">9:16 — vertical (TikTok / Shorts)</option>
+                  <option value="16:9">16:9 — horizontal</option>
+                  <option value="1:1">1:1 — square</option>
+                </select>
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="vibe" className="text-sm font-medium">
+                  Vibe hint{" "}
+                  <span className="font-normal text-muted-foreground">(optional)</span>
+                </label>
+                <Input
+                  id="vibe"
+                  name="vibe"
+                  placeholder="e.g. funny reactions, key insights, dramatic moments"
+                  disabled={pending}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Free-text steer for Gemini when it ranks candidates.
+                </p>
+              </div>
+            </div>
+          )}
+
           {state.error && (
             <p className="text-sm text-destructive" role="alert">
               {state.error}

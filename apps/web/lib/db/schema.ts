@@ -45,7 +45,27 @@ const updatedAt = () =>
 // ============================================================================
 // PROJECTS
 // A "project" is one source video we want to clip. It groups everything else.
+//
+// `settingsJson` holds user-configurable knobs picked when the project is
+// created (number of clips, length range, aspect ratio, vibe hint). Every
+// downstream stage (analyze, render, publish) reads from this one place.
 // ============================================================================
+export type ProjectSettings = {
+  topN: number; // 1..20 — how many highlights to keep
+  minClipSeconds: number; // default 20
+  maxClipSeconds: number; // default 60
+  aspect: "9:16" | "16:9" | "1:1"; // default "9:16"
+  vibe: string; // free-text hint passed to Gemini (e.g. "funny moments")
+};
+
+export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
+  topN: 3,
+  minClipSeconds: 20,
+  maxClipSeconds: 60,
+  aspect: "9:16",
+  vibe: "",
+};
+
 export const projects = sqliteTable("projects", {
   id: id(),
   name: text("name").notNull(),
@@ -67,6 +87,7 @@ export const projects = sqliteTable("projects", {
     .notNull()
     .default("pending"),
   notes: text("notes"),
+  settingsJson: text("settings_json", { mode: "json" }).$type<ProjectSettings>(),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });

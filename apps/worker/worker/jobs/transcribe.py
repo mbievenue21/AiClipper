@@ -24,6 +24,7 @@ from ..config import get_settings
 from ..db import session_scope
 from ..models import Project, Transcript, TranscriptSegment, Video
 from ..transcribe import transcribe as run_transcription
+from . import queue
 from .handlers import ProgressReporter, register
 
 log = structlog.get_logger(__name__)
@@ -78,14 +79,24 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
             select(Transcript).where(Transcript.video_id == video.id)
         ).scalar_one_or_none()
         if existing is not None:
-            # Idempotency: don't re-transcribe if we already have one.
+            # Idempotency: don't re-transcribe if we already have one. Still
+            # kick off analyze so re-runs cleanly advance the pipeline.
             log.info("transcribe_skipped_existing", transcript_id=existing.id, video_id=video.id)
-            _set_project_status(session, project, "ready")
+            _set_project_status(session, project, "analyzing")
+            existing_id = existing.id
+            existing_video_id = video.id
+            # Enqueue outside the session to keep the transaction tight.
+            next_job = queue.enqueue(
+                "analyze",
+                {"project_id": project_id, "video_id": existing_video_id},
+                project_id=project_id,
+            )
             return {
-                "transcript_id": existing.id,
-                "video_id": video.id,
+                "transcript_id": existing_id,
+                "video_id": existing_video_id,
                 "skipped": True,
                 "reason": "transcript already exists",
+                "next_job_id": next_job.id,
             }
 
         _set_project_status(session, project, "transcribing")
@@ -150,7 +161,15 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
 
         project = session.get(Project, project_id)
         if project is not None:
-            _set_project_status(session, project, "ready")
+            # Step 7 (analyze) takes it from here.
+            _set_project_status(session, project, "analyzing")
+
+    # Chain Step 7: hand off to analyze.
+    next_job = queue.enqueue(
+        "analyze",
+        {"project_id": project_id, "video_id": video_id},
+        project_id=project_id,
+    )
 
     progress(1.0, "transcribe complete")
     log.info(
@@ -161,6 +180,7 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
         language=result.language,
         segment_count=len(result.segments),
         model=result.model_name,
+        next_job_id=next_job.id,
     )
 
     return {
@@ -170,4 +190,5 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
         "model": result.model_name,
         "segment_count": len(result.segments),
         "duration_seconds": duration,
+        "next_job_id": next_job.id,
     }

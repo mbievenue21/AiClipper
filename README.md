@@ -165,7 +165,7 @@ runs faster-whisper against `audio.wav` and writes the result to the
 - **Word timestamps:** stored as JSON on each segment for karaoke captions (Step 9) and snap-to-word clip cutting (Step 8).
 - **VAD filter:** silence is skipped, so long VODs transcribe faster.
 - **Model cache:** the loaded WhisperModel is reused across jobs in the same worker process (load ≈ 30 s for `large-v3`).
-- **Project status:** flips `pending → ingesting → pending → transcribing → ready`. Step 7 will insert an `analyzing` stage between transcribing and ready.
+- **Project status:** `pending → ingesting → pending → transcribing → analyzing → ready` (the `analyzing` stage was added in Step 7).
 
 What lands in the DB after a successful transcribe:
 
@@ -202,7 +202,73 @@ End-to-end: submit a short YouTube URL in the UI and watch the project page.
 You should see the **Ingest** job complete, then a **Transcribe** job appear
 and progress to 100 %, and finally a **Transcript** card with the language,
 segment count, and a preview of the full text.
-- [ ] Step 7 — Highlight analysis (audio + chat + Gemini Flash)
+
+### Step 7 — What works today
+
+After transcription, the worker auto-enqueues an **analyze** job that turns
+the transcript + audio + (optional) chat into a ranked list of highlight
+clips:
+
+1. **`librosa`** computes a per-second "excitement" curve from RMS energy +
+   onset strength. Saved to the `audio_features` table.
+2. **Twitch chat replay** (if `ingest` captured one) is parsed into
+   `chat_events` rows and binned into a per-second density curve.
+3. A **sliding-window scorer** walks the transcript and produces candidate
+   clips that respect the user's min/max length, blending audio + chat +
+   keyword signals and applying non-max suppression.
+4. **Gemini 2.5 Flash** reranks the top ~15 candidates against the user's
+   "vibe" hint and writes punchy titles + 1–2 sentence summaries.
+   If `GEMINI_API_KEY` is missing, the pipeline degrades gracefully to
+   local scoring with auto-generated titles.
+5. The final top-N highlights land in the `highlights` table with
+   `score`, `title`, `summary`, and a `reasonJson` blob that records every
+   signal that contributed.
+
+#### User-configurable settings (per project)
+
+Set on the **/projects/new** form under "Advanced — clip settings" and
+stored as `projects.settings_json`:
+
+| Setting           | Default | Range         | Purpose                                  |
+|-------------------|---------|---------------|------------------------------------------|
+| `topN`            | 3       | 1–20          | How many highlights to keep              |
+| `minClipSeconds`  | 20      | 5–120         | Lower bound on clip duration             |
+| `maxClipSeconds`  | 60      | 10–180        | Upper bound on clip duration             |
+| `aspect`          | 9:16    | 9:16 \| 16:9 \| 1:1 | Output aspect ratio for Step 8       |
+| `vibe`            | ""      | free text     | Steers Gemini's selection ("funny", etc.)|
+
+### Install Step 7
+
+```powershell
+pnpm --filter worker run setup:analyze   # librosa, scenedetect, google-genai
+```
+
+Then in `.env`, set **`GEMINI_API_KEY`** to your key from
+[Google AI Studio](https://aistudio.google.com/apikey). The free tier is
+generous and Gemini 2.5 Flash is cheap; without a key the pipeline still
+works, it just uses local-only scoring.
+
+If you change the schema (already done for `settings_json` in Step 7) you
+must also run the migration:
+
+```powershell
+pnpm --filter web run db:generate   # generates lib/db/migrations/NNNN_*.sql
+pnpm --filter web run db:migrate    # applies pending migrations
+```
+
+### Verify Step 7
+
+```powershell
+# Handler registered + librosa/scenedetect/google-genai imports + API key check
+cd apps\worker
+.venv\Scripts\python scripts\smoke_analyze.py
+```
+
+End-to-end: create a new project. After ingest and transcribe finish,
+watch the **Analyze** job card climb to 100 %, then a **Highlight
+candidates** card appears showing the top-N clips with scores, titles,
+summaries, and per-signal breakdown chips.
+- [x] Step 7 — Highlight analysis (audio + chat + Gemini Flash)
 - [ ] Step 8 — Clip rendering (FFmpeg, scene snapping, vertical reformat)
 - [ ] Step 9 — Captions (Remotion overlay)
 - [ ] Step 10 — Thumbnails (frame extraction + Satori)

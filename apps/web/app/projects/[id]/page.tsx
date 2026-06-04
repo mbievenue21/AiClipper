@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { desc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 import { formatDistanceToNow } from "date-fns";
-import { ArrowLeft, FileText, FileVideo } from "lucide-react";
+import { ArrowLeft, FileText, FileVideo, Sparkles } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,11 @@ import {
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { db, schema } from "@/lib/db/client";
+import {
+  DEFAULT_PROJECT_SETTINGS,
+  type HighlightReason,
+  type ProjectSettings,
+} from "@/lib/db/schema";
 import { RefreshWhenRunning } from "./refresh-when-running";
 
 export const dynamic = "force-dynamic";
@@ -61,6 +66,14 @@ function formatDuration(seconds: number | null | undefined): string {
   return `${s}s`;
 }
 
+function formatTimecode(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 type PageProps = { params: Promise<{ id: string }> };
 
 export default async function ProjectPage({ params }: PageProps) {
@@ -74,6 +87,9 @@ export default async function ProjectPage({ params }: PageProps) {
 
   if (!project) notFound();
 
+  const settings: ProjectSettings =
+    project.settingsJson ?? DEFAULT_PROJECT_SETTINGS;
+
   const videos = await db
     .select()
     .from(schema.videos)
@@ -84,7 +100,7 @@ export default async function ProjectPage({ params }: PageProps) {
     .from(schema.jobs)
     .where(eq(schema.jobs.projectId, id))
     .orderBy(desc(schema.jobs.createdAt))
-    .limit(10);
+    .limit(15);
 
   const video = videos[0];
 
@@ -109,7 +125,14 @@ export default async function ProjectPage({ params }: PageProps) {
       )[0] ?? null
     : null;
 
-  // Latest job of each type (jobs are ordered newest first above).
+  const highlights = video
+    ? await db
+        .select()
+        .from(schema.highlights)
+        .where(eq(schema.highlights.videoId, video.id))
+        .orderBy(desc(schema.highlights.score), asc(schema.highlights.startSeconds))
+    : [];
+
   const latestByType = new Map<string, (typeof jobs)[number]>();
   for (const j of jobs) if (!latestByType.has(j.type)) latestByType.set(j.type, j);
 
@@ -123,6 +146,7 @@ export default async function ProjectPage({ params }: PageProps) {
     project.status === "analyzing";
 
   const statusLabel = (() => {
+    if (project.status === "ready" && highlights.length > 0) return "highlights ready";
     if (project.status === "pending" && transcript) return "transcribed";
     if (project.status === "pending" && video) return "downloaded";
     if (project.status === "ready" && transcript) return "transcribed";
@@ -148,13 +172,17 @@ export default async function ProjectPage({ params }: PageProps) {
               {project.sourceUrl}
             </p>
           )}
+          <p className="mt-2 text-xs text-muted-foreground">
+            Settings: {settings.topN} clips · {settings.minClipSeconds}–
+            {settings.maxClipSeconds}s · {settings.aspect}
+            {settings.vibe ? ` · vibe: "${settings.vibe}"` : null}
+          </p>
         </div>
         <Badge variant={statusVariants[project.status] ?? "secondary"}>
           {statusLabel}
         </Badge>
       </div>
 
-      {/* Job cards: most recent first */}
       {Array.from(latestByType.values()).map((j) => (
         <Card key={j.id} className="mb-4">
           <CardHeader className="pb-2">
@@ -237,7 +265,7 @@ export default async function ProjectPage({ params }: PageProps) {
         </Card>
       ) : (
         !pipelineActive && (
-          <Card className="border-dashed">
+          <Card className="border-dashed mb-4">
             <CardContent className="py-8 text-center text-sm text-muted-foreground">
               No video file yet.
             </CardContent>
@@ -272,10 +300,100 @@ export default async function ProjectPage({ params }: PageProps) {
             ) : (
               <p className="text-sm text-muted-foreground">No text extracted.</p>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {highlights.length > 0 && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Sparkles className="size-4" />
+              Highlight candidates
+            </CardTitle>
+            <CardDescription>
+              Top {highlights.length} clip{highlights.length === 1 ? "" : "s"}{" "}
+              picked from the transcript, audio, and chat signals. Step 8 will
+              render the ones you approve.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {highlights.map((h, idx) => {
+              const reason = h.reasonJson as HighlightReason | null;
+              const duration = h.endSeconds - h.startSeconds;
+              return (
+                <div
+                  key={h.id}
+                  className="rounded-md border border-border p-3"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono text-muted-foreground">
+                          #{idx + 1}
+                        </span>
+                        <h3 className="font-medium leading-tight">
+                          {h.title || `Highlight @ ${formatTimecode(h.startSeconds)}`}
+                        </h3>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {formatTimecode(h.startSeconds)} →{" "}
+                        {formatTimecode(h.endSeconds)} · {duration.toFixed(1)}s
+                      </p>
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <div className="text-lg font-semibold">
+                        {(h.score * 100).toFixed(0)}
+                      </div>
+                      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        score
+                      </div>
+                    </div>
+                  </div>
+                  {h.summary && (
+                    <p className="mt-2 text-sm text-foreground/90">
+                      {h.summary}
+                    </p>
+                  )}
+                  {reason && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {reason.signals?.map((sig) => (
+                        <span
+                          key={sig}
+                          className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+                        >
+                          {sig.replace(/_/g, " ")}
+                        </span>
+                      ))}
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                        audio {((reason.audioScore ?? 0) * 100).toFixed(0)}
+                      </span>
+                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                        chat {((reason.chatScore ?? 0) * 100).toFixed(0)}
+                      </span>
+                      {reason.llmScore > 0 && (
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                          llm {((reason.llmScore ?? 0) * 100).toFixed(0)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             <p className="text-xs text-muted-foreground">
-              Step 7 (highlight analysis) will use these segments + word-level
-              timings to pick clip candidates.
+              Step 8 (clip render) will turn the approved ones into actual{" "}
+              {settings.aspect} video files with captions.
             </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {project.status === "ready" && highlights.length === 0 && (
+        <Card className="border-dashed mb-4">
+          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+            Analysis complete but no highlights were found. The video may be too
+            short for your clip-length range, or audio was uniformly quiet.
           </CardContent>
         </Card>
       )}

@@ -1,3 +1,4 @@
+import * as React from "react"
 import { Button as ButtonPrimitive } from "@base-ui/react/button"
 import { cva, type VariantProps } from "class-variance-authority"
 
@@ -40,19 +41,48 @@ const buttonVariants = cva(
   }
 )
 
+type ButtonProps = ButtonPrimitive.Props &
+  VariantProps<typeof buttonVariants> & {
+    /**
+     * When true, the Button passes its styles through to its single child
+     * element instead of rendering a real <button>. Use this to style a
+     * <Link>, <a>, or other custom element while keeping the same look.
+     */
+    asChild?: boolean
+  }
+
 function Button({
+  asChild,
   className,
   variant = "default",
   size = "default",
+  children,
   ...props
-}: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
+}: ButtonProps) {
+  const mergedClass = cn(buttonVariants({ variant, size, className }))
+
+  if (asChild) {
+    const child = React.Children.only(children) as React.ReactElement<{
+      className?: string
+      "data-slot"?: string
+    }>
+    return React.cloneElement(child, {
+      ...(props as Record<string, unknown>),
+      "data-slot": "button",
+      className: cn(mergedClass, child.props.className),
+    })
+  }
+
   return (
     <ButtonPrimitive
       data-slot="button"
-      className={cn(buttonVariants({ variant, size, className }))}
+      className={mergedClass}
       {...props}
-    />
+    >
+      {children}
+    </ButtonPrimitive>
   )
 }
 
 export { Button, buttonVariants }
+export type { ButtonProps }

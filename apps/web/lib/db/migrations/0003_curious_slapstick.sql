@@ -1,0 +1,1 @@
+ALTER TABLE `highlights` ADD `generated_metadata_json` text;

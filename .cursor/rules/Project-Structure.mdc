@@ -60,4 +60,4 @@ Preferred implementation sequence:
 10. Implement thumbnails.
 11. Implement SSE progress.
 12. Implement YouTube OAuth/publishing.
-13. Implement TikTok last.
+13. Implement Instagram Reels publishing (via Meta Business Login).

@@ -34,7 +34,10 @@ class Settings(BaseSettings):
     transcribe_backend: Literal["local", "groq"] = Field(
         default="local", alias="TRANSCRIBE_BACKEND"
     )
-    whisper_model: str = Field(default="large-v3", alias="WHISPER_MODEL")
+    # Defaults to `small` (244M params) — runs at ~5-7x realtime on a modern
+    # CPU and produces transcripts good enough for highlight ranking. Bump to
+    # `medium` or `large-v3` only if you have a CUDA GPU.
+    whisper_model: str = Field(default="small", alias="WHISPER_MODEL")
     whisper_compute_type: str = Field(
         default="float16", alias="WHISPER_COMPUTE_TYPE"
     )
@@ -42,6 +45,17 @@ class Settings(BaseSettings):
     whisper_device: Literal["auto", "cuda", "cpu"] = Field(
         default="auto", alias="WHISPER_DEVICE"
     )
+    # Beam size: 1 is greedy decoding (~2x faster than beam=5, ~1% WER hit on
+    # clean English). Keep this at 1 unless you're doing accent-heavy content.
+    whisper_beam_size: int = Field(default=1, alias="WHISPER_BEAM_SIZE")
+    # Optional language hint (e.g. "en"). Skips Whisper's language detection
+    # pass — saves ~2-5s on long videos.
+    whisper_language: str | None = Field(default=None, alias="WHISPER_LANGUAGE")
+    # CPU threads for CTranslate2. 0 = auto (uses OMP_NUM_THREADS or all cores).
+    whisper_cpu_threads: int = Field(default=0, alias="WHISPER_CPU_THREADS")
+    # VAD min silence to trim. 700ms cuts ~30% of speech gaps; lower if your
+    # content has rapid back-and-forth dialogue you don't want clipped.
+    whisper_vad_silence_ms: int = Field(default=700, alias="WHISPER_VAD_SILENCE_MS")
     groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
 
     # ---- AI: highlights / thumbnails -------------------------------------

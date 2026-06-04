@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -116,15 +117,30 @@ def _select_device_compute() -> tuple[str, str]:
 def _load_whisper_model(sig: tuple[str, str, str]) -> Any:
     from faster_whisper import WhisperModel
 
-    log.info("whisper_load_start", model=sig[0], device=sig[1], compute_type=sig[2])
+    settings = get_settings()
+    cpu_threads = max(0, int(settings.whisper_cpu_threads))
+    # num_workers=1 keeps inference deterministic (the job runner already
+    # serializes jobs); a value >1 only helps if you batch multiple files.
+    common_kwargs = {"cpu_threads": cpu_threads, "num_workers": 1}
+
+    log.info(
+        "whisper_load_start",
+        model=sig[0],
+        device=sig[1],
+        compute_type=sig[2],
+        cpu_threads=cpu_threads or "auto",
+    )
     try:
-        return WhisperModel(sig[0], device=sig[1], compute_type=sig[2])
+        return WhisperModel(sig[0], device=sig[1], compute_type=sig[2], **common_kwargs)
     except Exception as exc:
         if sig[1] == "cuda":
             log.warning("whisper_cuda_load_failed_falling_back_cpu", reason=str(exc))
             fallback_sig = (sig[0], "cpu", "int8")
             model = WhisperModel(
-                fallback_sig[0], device=fallback_sig[1], compute_type=fallback_sig[2]
+                fallback_sig[0],
+                device=fallback_sig[1],
+                compute_type=fallback_sig[2],
+                **common_kwargs,
             )
             global _model, _model_signature
             _model = model
@@ -169,12 +185,31 @@ def _is_cuda_runtime_error(exc: BaseException) -> bool:
 
 
 def _run_transcribe(model: Any, audio_path: Path) -> tuple[Any, Any]:
+    settings = get_settings()
     return model.transcribe(
         str(audio_path),
-        beam_size=5,
+        # Decoding ----
+        # beam_size=1 is greedy and ~2x faster than the default 5; we
+        # accept ~1% WER hit because Gemini re-reads the transcript anyway.
+        beam_size=max(1, int(settings.whisper_beam_size)),
+        best_of=1,
+        # Single temperature disables the fallback ladder (Whisper's default
+        # tries up to 6 temperatures on low-confidence segments → ~2x slowdown
+        # in tricky audio).
+        temperature=0.0,
+        # Avoids "prior text" hallucination cascades and removes a per-segment
+        # serialization dependency, making each chunk independent.
+        condition_on_previous_text=False,
+        # Language hint skips Whisper's detection pass (~3s saved on long files).
+        language=settings.whisper_language,
+        # Word-level timing is required for caption alignment (Step 9).
         word_timestamps=True,
+        # VAD trims silence before each chunk runs through the model. This is
+        # the single biggest speed win on long videos with quiet stretches.
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
+        vad_parameters={
+            "min_silence_duration_ms": int(settings.whisper_vad_silence_ms),
+        },
     )
 
 
@@ -217,6 +252,7 @@ def transcribe_local(
     text_parts: list[str] = []
     last_reported = 0.10
     total = duration_seconds if duration_seconds and duration_seconds > 0 else None
+    inference_started = time.monotonic()
 
     for segment in segments_iter:
         words: list[dict[str, Any]] = []
@@ -244,9 +280,28 @@ def transcribe_local(
         if total is not None:
             pct = 0.10 + min(0.85, segment.end / total) * 0.85
             if pct - last_reported >= 0.01:
-                progress(pct, f"transcribed to {int(segment.end)}s of {int(total)}s")
+                elapsed = time.monotonic() - inference_started
+                # Realtime ratio: 2.0 = transcribing twice as fast as audio runs.
+                # Anything <1.0 means we're slower than realtime (bad on CPU).
+                ratio = (segment.end / elapsed) if elapsed > 0 else 0.0
+                remaining = max(0.0, total - segment.end)
+                eta = remaining / ratio if ratio > 0 else 0.0
+                progress(
+                    pct,
+                    f"transcribed {int(segment.end)}s/{int(total)}s "
+                    f"({ratio:.1f}x realtime, ~{int(eta)}s left)",
+                )
                 last_reported = pct
 
+    elapsed = time.monotonic() - inference_started
+    if total:
+        log.info(
+            "whisper_inference_done",
+            audio_seconds=total,
+            wall_seconds=round(elapsed, 1),
+            realtime_ratio=round(total / elapsed, 2) if elapsed > 0 else None,
+            beam_size=get_settings().whisper_beam_size,
+        )
     progress(0.97, "transcription complete")
 
     return TranscriptResult(

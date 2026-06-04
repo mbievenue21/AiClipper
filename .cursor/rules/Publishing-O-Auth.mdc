@@ -3,9 +3,9 @@ globs: apps/worker/worker/jobs/publish.py, apps/web/app/api/**/*.ts, apps/web/**
 alwaysApply: false
 ---
 
-Use these rules for YouTube, TikTok, OAuth, scheduled uploads, and connected creator accounts.
+Use these rules for YouTube, Instagram Reels, OAuth, scheduled uploads, and connected creator accounts.
 
-Publishing is a later-stage feature. Do not implement TikTok before core clipping, rendering, and YouTube flow are stable.
+Publishing is a later-stage feature. Implement the YouTube path first; Instagram Reels publishing builds on top once core clipping and rendering are stable.
 
 Accounts:
 - Store connected platform accounts in the accounts table.
@@ -26,10 +26,12 @@ YouTube:
 - Support title, description, thumbnail, visibility, and scheduled time where possible.
 - Handle quota and API errors gracefully.
 
-TikTok:
-- Treat TikTok publishing as a later integration.
-- Expect API approval, OAuth scopes, and platform restrictions.
-- Do not assume TikTok upload works the same as YouTube.
+Instagram (Reels):
+- Uses the Instagram Business Login flow (2024 unified flow, no Facebook Page intermediate).
+- Only Business and Creator accounts can publish via the Content Publishing API.
+- Reels are uploaded by URL, not by multipart upload — Instagram fetches the file from a public HTTPS URL. The worker constructs that URL from NEXT_PUBLIC_APP_URL + /api/media/<clip>. Local development requires a tunnel (Cloudflared/ngrok) to expose port 3000.
+- The 60-day long-lived token has no refresh_token; renewal happens via GET /refresh_access_token.
+- Instagram has no private/unlisted/public toggle — every published Reel is public to followers.
 
 Safety and rights:
 - Only publish content the user owns or is authorized to publish.

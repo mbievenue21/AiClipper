@@ -1,8 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { asc, desc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { formatDistanceToNow } from "date-fns";
-import { ArrowLeft, FileText, FileVideo, Sparkles } from "lucide-react";
+import { ArrowLeft, FileText, FileVideo, Film, Sparkles } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,11 +16,18 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { db, schema } from "@/lib/db/client";
 import {
+  DEFAULT_CAPTION_SETTINGS,
   DEFAULT_PROJECT_SETTINGS,
+  type ClipCaptionSettings,
+  type GeneratedUploadMetadata,
   type HighlightReason,
   type ProjectSettings,
 } from "@/lib/db/schema";
-import { RefreshWhenRunning } from "./refresh-when-running";
+
+import { ClipCard, type ClipCardData } from "./clip-card";
+import { RenderHighlightButton } from "./highlight-actions";
+import { ProjectLiveProgress } from "./project-live-progress";
+import type { AccountOption } from "./schedule-upload-dialog";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +48,7 @@ const JOB_LABELS: Record<string, string> = {
   transcribe: "Transcribe",
   analyze: "Analyze",
   render: "Render",
+  caption: "Captions",
   publish: "Publish",
 };
 
@@ -100,7 +108,7 @@ export default async function ProjectPage({ params }: PageProps) {
     .from(schema.jobs)
     .where(eq(schema.jobs.projectId, id))
     .orderBy(desc(schema.jobs.createdAt))
-    .limit(15);
+    .limit(30);
 
   const video = videos[0];
 
@@ -133,6 +141,95 @@ export default async function ProjectPage({ params }: PageProps) {
         .orderBy(desc(schema.highlights.score), asc(schema.highlights.startSeconds))
     : [];
 
+  const highlightIds = highlights.map((h) => h.id);
+  const clips =
+    highlightIds.length > 0
+      ? await db
+          .select()
+          .from(schema.clips)
+          .where(inArray(schema.clips.highlightId, highlightIds))
+          .orderBy(desc(schema.clips.createdAt))
+      : [];
+
+  const clipIds = clips.map((c) => c.id);
+  const uploads =
+    clipIds.length > 0
+      ? await db
+          .select()
+          .from(schema.scheduledUploads)
+          .where(inArray(schema.scheduledUploads.clipId, clipIds))
+          .orderBy(asc(schema.scheduledUploads.scheduledFor))
+      : [];
+
+  const accounts = await db
+    .select({
+      id: schema.accounts.id,
+      platform: schema.accounts.platform,
+      label: schema.accounts.label,
+    })
+    .from(schema.accounts);
+
+  // Index latest active job per (clip_id) so the clip card can show progress.
+  const activeJobByClip = new Map<
+    string,
+    { type: string; progress: number; progressMessage: string | null }
+  >();
+  for (const j of jobs) {
+    if (j.status !== "running" && j.status !== "pending") continue;
+    if (j.type !== "render" && j.type !== "caption") continue;
+    const payload = j.payloadJson as { clip_id?: string; highlight_id?: string };
+    let clipId = payload?.clip_id;
+    if (!clipId && payload?.highlight_id) {
+      const c = clips.find((x) => x.highlightId === payload.highlight_id);
+      clipId = c?.id;
+    }
+    if (clipId && !activeJobByClip.has(clipId)) {
+      activeJobByClip.set(clipId, {
+        type: j.type,
+        progress: j.progress,
+        progressMessage: j.progressMessage,
+      });
+    }
+  }
+
+  const clipCards: ClipCardData[] = clips.map((c) => {
+    const highlight = highlights.find((h) => h.id === c.highlightId);
+    const clipUploads = uploads
+      .filter((u) => u.clipId === c.id)
+      .map((u) => ({
+        id: u.id,
+        platform: u.platform as "youtube" | "instagram",
+        status: u.status,
+        scheduledFor:
+          u.scheduledFor instanceof Date
+            ? u.scheduledFor.getTime()
+            : Number(u.scheduledFor),
+        timezone: u.timezone,
+        externalUrl: u.externalUrl,
+        errorMessage: u.errorMessage,
+      }));
+    return {
+      id: c.id,
+      highlightId: c.highlightId,
+      title:
+        highlight?.title ||
+        (highlight ? `Highlight @ ${formatTimecode(highlight.startSeconds)}` : "Clip"),
+      status: c.status as ClipCardData["status"],
+      filePath: c.filePath,
+      captionedFilePath: c.captionedFilePath,
+      hasCaptions: c.hasCaptions,
+      aspect: c.aspect,
+      durationSeconds: c.durationSeconds,
+      dominantColor: c.dominantColor,
+      errorMessage: c.errorMessage,
+      captionStyle: (c.captionStyleJson as ClipCaptionSettings) ?? null,
+      generatedMetadata:
+        (highlight?.generatedMetadataJson as GeneratedUploadMetadata) ?? null,
+      activeJob: activeJobByClip.get(c.id) ?? null,
+      uploads: clipUploads,
+    };
+  });
+
   const latestByType = new Map<string, (typeof jobs)[number]>();
   for (const j of jobs) if (!latestByType.has(j.type)) latestByType.set(j.type, j);
 
@@ -146,6 +243,7 @@ export default async function ProjectPage({ params }: PageProps) {
     project.status === "analyzing";
 
   const statusLabel = (() => {
+    if (project.status === "ready" && clips.length > 0) return "clips ready";
     if (project.status === "ready" && highlights.length > 0) return "highlights ready";
     if (project.status === "pending" && transcript) return "transcribed";
     if (project.status === "pending" && video) return "downloaded";
@@ -153,9 +251,26 @@ export default async function ProjectPage({ params }: PageProps) {
     return project.status;
   })();
 
+  const accountOptions: AccountOption[] = accounts
+    .filter((a) => a.platform === "youtube" || a.platform === "instagram")
+    .map((a) => ({
+      id: a.id,
+      platform: a.platform as "youtube" | "instagram",
+      label: a.label,
+    }));
+
+  const renderedHighlightIds = new Set(clips.map((c) => c.highlightId));
+  const defaultDescription = [
+    project.name,
+    settings.vibe ? `Vibe: ${settings.vibe}` : null,
+    "Made with AiClipper.",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
   return (
     <div className="container mx-auto max-w-3xl px-4 py-10">
-      <RefreshWhenRunning active={pipelineActive} />
+      <ProjectLiveProgress projectId={id} active={pipelineActive} />
 
       <Button variant="ghost" size="sm" className="mb-6 -ml-2" asChild>
         <Link href="/">
@@ -183,30 +298,32 @@ export default async function ProjectPage({ params }: PageProps) {
         </Badge>
       </div>
 
-      {Array.from(latestByType.values()).map((j) => (
-        <Card key={j.id} className="mb-4">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">
-              {JOB_LABELS[j.type] ?? j.type} job
-            </CardTitle>
-            <CardDescription>
-              {j.status}
-              {j.progressMessage ? ` — ${j.progressMessage}` : null}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            <Progress value={Math.round(j.progress * 100)} />
-            <p className="text-xs text-muted-foreground">
-              {Math.round(j.progress * 100)}% · job {j.id}
-            </p>
-            {j.errorMessage && (
-              <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap">
-                {j.errorMessage}
-              </pre>
-            )}
-          </CardContent>
-        </Card>
-      ))}
+      {Array.from(latestByType.values())
+        .filter((j) => j.type !== "render" && j.type !== "caption" && j.type !== "publish")
+        .map((j) => (
+          <Card key={j.id} className="mb-4">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">
+                {JOB_LABELS[j.type] ?? j.type} job
+              </CardTitle>
+              <CardDescription>
+                {j.status}
+                {j.progressMessage ? ` — ${j.progressMessage}` : null}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <Progress value={Math.round(j.progress * 100)} />
+              <p className="text-xs text-muted-foreground">
+                {Math.round(j.progress * 100)}% · job {j.id}
+              </p>
+              {j.errorMessage && (
+                <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap">
+                  {j.errorMessage}
+                </pre>
+              )}
+            </CardContent>
+          </Card>
+        ))}
 
       {video ? (
         <Card className="mb-4">
@@ -245,22 +362,6 @@ export default async function ProjectPage({ params }: PageProps) {
                   .join(" · ") || "—"}
               </p>
             </div>
-            {video.audioPath && (
-              <div className="sm:col-span-2">
-                <span className="text-muted-foreground">Audio track</span>
-                <p>
-                  <code className="text-xs">{video.audioPath}</code>
-                </p>
-              </div>
-            )}
-            {video.chatJsonPath && (
-              <div className="sm:col-span-2">
-                <span className="text-muted-foreground">Chat replay</span>
-                <p>
-                  <code className="text-xs">{video.chatJsonPath}</code>
-                </p>
-              </div>
-            )}
           </CardContent>
         </Card>
       ) : (
@@ -312,15 +413,16 @@ export default async function ProjectPage({ params }: PageProps) {
               Highlight candidates
             </CardTitle>
             <CardDescription>
-              Top {highlights.length} clip{highlights.length === 1 ? "" : "s"}{" "}
-              picked from the transcript, audio, and chat signals. Step 8 will
-              render the ones you approve.
+              {highlights.length} clip{highlights.length === 1 ? "" : "s"} picked.
+              Click <strong>Render</strong> on any of them to cut the final
+              vertical video and (optionally) burn in captions.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {highlights.map((h, idx) => {
               const reason = h.reasonJson as HighlightReason | null;
               const duration = h.endSeconds - h.startSeconds;
+              const rendered = renderedHighlightIds.has(h.id);
               return (
                 <div
                   key={h.id}
@@ -378,13 +480,43 @@ export default async function ProjectPage({ params }: PageProps) {
                       )}
                     </div>
                   )}
+                  <div className="mt-3 flex justify-end">
+                    <RenderHighlightButton
+                      projectId={id}
+                      highlightId={h.id}
+                      alreadyRendered={rendered}
+                    />
+                  </div>
                 </div>
               );
             })}
-            <p className="text-xs text-muted-foreground">
-              Step 8 (clip render) will turn the approved ones into actual{" "}
-              {settings.aspect} video files with captions.
-            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {clipCards.length > 0 && (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Film className="size-4" />
+              Rendered clips ({clipCards.length})
+            </CardTitle>
+            <CardDescription>
+              Each card is a final cut. Add captions, restyle, download, or
+              schedule uploads from here.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {clipCards.map((c) => (
+              <ClipCard
+                key={c.id}
+                projectId={id}
+                clip={c}
+                accounts={accountOptions}
+                defaultTitle={c.title}
+                defaultDescription={defaultDescription}
+              />
+            ))}
           </CardContent>
         </Card>
       )}
@@ -415,3 +547,5 @@ export default async function ProjectPage({ params }: PageProps) {
     </div>
   );
 }
+
+void DEFAULT_CAPTION_SETTINGS; // keep type import alive for type-only usage

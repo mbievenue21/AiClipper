@@ -14,7 +14,7 @@ Primary user flow:
 4. Worker runs ingest, transcribe, analyze, render, and publish stages.
 5. UI displays live job status through Server-Sent Events.
 6. User reviews highlights and generates clips.
-7. User may later schedule uploads to YouTube, TikTok, or other platforms.
+7. User may later schedule uploads to YouTube or Instagram Reels.
 
 Current stack:
 - Monorepo: pnpm workspace

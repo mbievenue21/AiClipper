@@ -234,6 +234,26 @@ export type HighlightReason = {
   signals: string[]; // e.g. ["chat_spike", "laughter", "key_phrase"]
 };
 
+/**
+ * AI-generated upload metadata. Lives on the highlight (the content) so
+ * it's reused across re-renders of the same clip. Populated lazily by
+ * the "Generate with AI" button in the schedule dialog or eagerly after
+ * render completes; user can always override before publishing.
+ *
+ * `model` and `generatedAt` are kept so we can show stale-content warnings
+ * if the underlying transcript/highlight changed after generation.
+ */
+export type GeneratedUploadMetadata = {
+  title: string;
+  description: string;
+  tags: string[];
+  hashtags?: string[]; // separate from tags — IG/Shorts caption hashtags
+  hook?: string; // optional 1-line attention grabber
+  model: string;
+  generatedAt: number; // epoch ms
+  version: number;
+};
+
 export const highlights = sqliteTable(
   "highlights",
   {
@@ -252,6 +272,9 @@ export const highlights = sqliteTable(
     })
       .notNull()
       .default("candidate"),
+    generatedMetadataJson: text("generated_metadata_json", {
+      mode: "json",
+    }).$type<GeneratedUploadMetadata>(),
     createdAt: createdAt(),
   },
   (t) => [index("highlights_video_score_idx").on(t.videoId, t.score)],
@@ -262,7 +285,47 @@ export const highlights = sqliteTable(
 // The actual rendered video file for an approved highlight. We may render
 // multiple variants of the same highlight (horizontal + vertical + with
 // captions vs without), each row representing one output file.
+//
+// Lifecycle: a clip row is created with status="rendering" when the user
+// clicks "Render", flipped to "ready" once the worker finishes, or "failed"
+// with an error message. Captions are layered on AFTER the source render
+// completes; `captionStyleJson` and `captionedFilePath` track that step.
 // ============================================================================
+export type CaptionFont =
+  | "inter"
+  | "bebas"
+  | "anton"
+  | "marker"
+  | "mono"
+  | "montserrat";
+
+export type CaptionStyle =
+  | "highlight" // current word highlighted
+  | "popup" // each word pops in with scale
+  | "karaoke" // sweep through words
+  | "minimal"; // clean static block
+
+export type ClipCaptionSettings = {
+  font: CaptionFont;
+  style: CaptionStyle;
+  // When true the caption color is derived from the clip's dominant frame
+  // color (a contrasting gradient). When false the user-picked color is used.
+  autoColor: boolean;
+  // Hex colors used when autoColor is false, or as a starting point otherwise.
+  primaryColor: string; // e.g. "#FFD700"
+  accentColor: string; // gradient end / outline
+  uppercase: boolean;
+};
+
+export const DEFAULT_CAPTION_SETTINGS: ClipCaptionSettings = {
+  font: "anton",
+  style: "highlight",
+  autoColor: true,
+  primaryColor: "#FFD700",
+  accentColor: "#FFFFFF",
+  uppercase: true,
+};
+
 export const clips = sqliteTable(
   "clips",
   {
@@ -271,13 +334,29 @@ export const clips = sqliteTable(
       .notNull()
       .references(() => highlights.id, { onDelete: "cascade" }),
     filePath: text("file_path").notNull(),
+    captionedFilePath: text("captioned_file_path"),
     thumbnailPath: text("thumbnail_path"),
     durationSeconds: real("duration_seconds"),
+    widthPx: integer("width_px"),
+    heightPx: integer("height_px"),
     aspect: text("aspect", { enum: ["16:9", "9:16", "1:1"] }).notNull(),
     hasCaptions: integer("has_captions", { mode: "boolean" })
       .notNull()
       .default(false),
+    status: text("status", {
+      enum: ["rendering", "ready", "captioning", "failed"],
+    })
+      .notNull()
+      .default("rendering"),
+    // Hex like "#1a2b3c", extracted from the median frame. Used to gradient
+    // captions toward the clip's primary visual color.
+    dominantColor: text("dominant_color"),
+    captionStyleJson: text("caption_style_json", {
+      mode: "json",
+    }).$type<ClipCaptionSettings>(),
+    errorMessage: text("error_message"),
     createdAt: createdAt(),
+    updatedAt: updatedAt(),
   },
   (t) => [index("clips_highlight_idx").on(t.highlightId)],
 );
@@ -292,7 +371,7 @@ export const accounts = sqliteTable(
   {
     id: id(),
     platform: text("platform", {
-      enum: ["youtube", "tiktok", "instagram"],
+      enum: ["youtube", "instagram"],
     }).notNull(),
     label: text("label").notNull(), // human-friendly: "Main YouTube channel"
     accessToken: text("access_token").notNull(),
@@ -312,7 +391,17 @@ export const accounts = sqliteTable(
 // A clip slated to be uploaded to a platform at a given time.
 // The worker scans this table periodically and uploads when `scheduledFor`
 // is in the past and status is still "pending".
+//
+// - `platform` is denormalized from the account so we can group/index easily.
+// - `timezone` is the IANA tz the user picked; the wall-clock time is already
+//   converted to epoch ms in `scheduledFor`, but we keep the tz so we can
+//   display it back as "Aug 14 6:30 PM CST" instead of the user's browser tz.
+// - `visibility` ("private" | "unlisted" | "public") gives a real safety net
+//   for YouTube — clips upload as private by default until the user flips it.
 // ============================================================================
+export type UploadPlatform = "youtube" | "instagram";
+export type UploadVisibility = "private" | "unlisted" | "public";
+
 export const scheduledUploads = sqliteTable(
   "scheduled_uploads",
   {
@@ -323,25 +412,36 @@ export const scheduledUploads = sqliteTable(
     accountId: text("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade" }),
+    platform: text("platform", { enum: ["youtube", "instagram"] }).notNull(),
     title: text("title").notNull(),
     description: text("description"),
     tagsJson: text("tags_json", { mode: "json" }).$type<string[]>(),
+    visibility: text("visibility", {
+      enum: ["private", "unlisted", "public"],
+    })
+      .notNull()
+      .default("private"),
+    timezone: text("timezone").notNull().default("America/Chicago"),
     scheduledFor: integer("scheduled_for", { mode: "timestamp_ms" }).notNull(),
     status: text("status", {
-      enum: ["pending", "uploading", "uploaded", "failed"],
+      enum: ["pending", "uploading", "uploaded", "failed", "cancelled"],
     })
       .notNull()
       .default("pending"),
     externalId: text("external_id"), // returned by platform after upload
     externalUrl: text("external_url"),
     errorMessage: text("error_message"),
+    attempts: integer("attempts").notNull().default(0),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (t) => [
     index("scheduled_uploads_due_idx").on(t.status, t.scheduledFor),
+    index("scheduled_uploads_clip_idx").on(t.clipId),
   ],
 );
+
+export const DEFAULT_TIMEZONE = "America/Chicago"; // Central Standard Time
 
 // ============================================================================
 // JOBS
@@ -355,6 +455,7 @@ export type JobType =
   | "transcribe"
   | "analyze"
   | "render"
+  | "caption"
   | "publish";
 
 export type JobStatus =
@@ -404,7 +505,11 @@ export type NewProject = typeof projects.$inferInsert;
 export type Video = typeof videos.$inferSelect;
 export type Highlight = typeof highlights.$inferSelect;
 export type Clip = typeof clips.$inferSelect;
+export type NewClip = typeof clips.$inferInsert;
 export type Job = typeof jobs.$inferSelect;
 export type NewJob = typeof jobs.$inferInsert;
 export type Account = typeof accounts.$inferSelect;
+export type NewAccount = typeof accounts.$inferInsert;
 export type ScheduledUpload = typeof scheduledUploads.$inferSelect;
+export type NewScheduledUpload = typeof scheduledUploads.$inferInsert;
+export type TranscriptSegment = typeof transcriptSegments.$inferSelect;

@@ -18,21 +18,32 @@ export async function enqueueIngestJob(
   projectId: string,
   url: string,
 ): Promise<WorkerJob> {
-  // Hard timeout — if the worker is down or restarting, fail fast instead of
-  // letting the server action hang for minutes and leave the project orphaned.
+  return enqueueJob({
+    type: "ingest",
+    project_id: projectId,
+    payload: { project_id: projectId, url },
+  });
+}
+
+/**
+ * Generic POST /jobs helper. Used for render, caption, and publish
+ * server actions. Includes the same fast-fail timeout as ingest.
+ */
+export async function enqueueJob(body: {
+  type: string;
+  project_id?: string;
+  payload?: Record<string, unknown>;
+  depends_on?: string;
+  max_attempts?: number;
+}): Promise<WorkerJob> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
-
   let res: Response;
   try {
     res = await fetch(`${getWorkerUrl()}/jobs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "ingest",
-        project_id: projectId,
-        payload: { project_id: projectId, url },
-      }),
+      body: JSON.stringify({ payload: {}, ...body }),
       cache: "no-store",
       signal: controller.signal,
     });
@@ -44,14 +55,12 @@ export async function enqueueIngestJob(
   } finally {
     clearTimeout(timeout);
   }
-
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(
-      `Worker rejected ingest job (${res.status}). Is the worker running on ${getWorkerUrl()}? ${detail}`,
+      `Worker rejected ${body.type} job (${res.status}). ${detail}`,
     );
   }
-
   return res.json() as Promise<WorkerJob>;
 }
 

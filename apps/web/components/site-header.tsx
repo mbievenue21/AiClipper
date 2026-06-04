@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Scissors, Wrench } from "lucide-react";
+import { HardDrive, Scissors, Wrench } from "lucide-react";
 
 export function SiteHeader() {
   return (
@@ -28,6 +28,13 @@ export function SiteHeader() {
           >
             <Wrench className="size-3.5" />
             Worker
+          </Link>
+          <Link
+            href="/storage"
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 hover:bg-accent hover:text-foreground"
+          >
+            <HardDrive className="size-3.5" />
+            Storage
           </Link>
         </nav>
       </div>

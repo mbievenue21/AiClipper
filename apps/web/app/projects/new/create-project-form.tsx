@@ -134,7 +134,7 @@ export function CreateProjectForm() {
                   disabled={pending}
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <option value="9:16">9:16 — vertical (TikTok / Shorts)</option>
+                  <option value="9:16">9:16 — vertical (Reels / Shorts)</option>
                   <option value="16:9">16:9 — horizontal</option>
                   <option value="1:1">1:1 — square</option>
                 </select>

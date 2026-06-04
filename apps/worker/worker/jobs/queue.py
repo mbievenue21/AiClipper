@@ -146,6 +146,40 @@ def heal_orphan_projects() -> int:
         return result.rowcount or 0
 
 
+_DUE_UPLOADS_SQL = text(
+    """
+    SELECT su.id
+    FROM scheduled_uploads su
+    WHERE su.status = 'pending'
+      AND su.scheduled_for <= :now
+      AND NOT EXISTS (
+        SELECT 1 FROM jobs j
+        WHERE j.type = 'publish'
+          AND j.status IN ('pending','running')
+          AND json_extract(j.payload_json, '$.upload_id') = su.id
+      )
+    ORDER BY su.scheduled_for ASC
+    LIMIT 50
+    """
+)
+
+
+def enqueue_due_uploads() -> list[str]:
+    """Enqueue publish jobs for every ``scheduled_uploads`` row that is due now.
+
+    Called periodically by the worker's scheduler tick. Idempotent: rows
+    that already have an in-flight publish job are skipped via the NOT EXISTS
+    clause above.
+    """
+    enqueued: list[str] = []
+    with session_scope() as session:
+        due_rows = session.execute(_DUE_UPLOADS_SQL, {"now": _now_ms()}).all()
+    for (upload_id,) in due_rows:
+        job = enqueue("publish", {"upload_id": upload_id})
+        enqueued.append(job.id)
+    return enqueued
+
+
 def update_progress(job_id: str, progress: float, message: str | None = None) -> None:
     with session_scope() as session:
         session.execute(

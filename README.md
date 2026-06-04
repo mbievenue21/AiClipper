@@ -2,7 +2,7 @@
 
 A personal-use web app that ingests long-form videos (Twitch / YouTube VODs,
 local files) and uses AI to extract short highlight clips, generate captions
-and thumbnails, and schedule uploads to YouTube and TikTok.
+and thumbnails, and schedule uploads to YouTube and Instagram Reels.
 
 Built to be **cheap to run** (mostly local, no managed cloud infra) and
 **accurate** (multi-signal highlight detection: chat density, audio energy,
@@ -29,7 +29,7 @@ LLM transcript ranking).
                 │  External APIs                  │
                 │  • Google Gemini (highlights)   │
                 │  • YouTube Data API (upload)    │
-                │  • TikTok Content API (upload)  │
+                │  • Instagram Graph API (Reels)  │
                 └─────────────────────────────────┘
 ```
 
@@ -116,7 +116,7 @@ ffprobe -version
 | Google Gemini | <https://aistudio.google.com/apikey> | Highlight detection (core) |
 | Groq (optional) | <https://console.groq.com/keys> | Whisper API fallback |
 | YouTube OAuth | <https://console.cloud.google.com/apis/credentials> | Scheduled uploads |
-| TikTok OAuth | <https://developers.tiktok.com/> | Scheduled uploads |
+| Instagram (Meta) | <https://developers.facebook.com/apps/> | Reels uploads |
 
 ## Build progress
 
@@ -269,12 +269,148 @@ watch the **Analyze** job card climb to 100 %, then a **Highlight
 candidates** card appears showing the top-N clips with scores, titles,
 summaries, and per-signal breakdown chips.
 - [x] Step 7 — Highlight analysis (audio + chat + Gemini Flash)
-- [ ] Step 8 — Clip rendering (FFmpeg, scene snapping, vertical reformat)
-- [ ] Step 9 — Captions (Remotion overlay)
-- [ ] Step 10 — Thumbnails (frame extraction + Satori)
-- [ ] Step 11 — Live progress UI (Server-Sent Events)
-- [ ] Step 12 — YouTube OAuth + scheduled uploads
-- [ ] Step 13 — TikTok upload integration
+- [x] Step 8 — Clip rendering (FFmpeg, scene snapping, vertical reformat with blurred fill)
+- [x] Step 9 — Captions (ASS subtitle overlays; Remotion package available for future expansion)
+- [ ] Step 10 — Thumbnails (frame extraction + Satori) — _intentionally skipped for now_
+- [x] Step 11 — Live progress UI (Server-Sent Events)
+- [x] Step 12 — YouTube OAuth + scheduled uploads
+- [x] Step 13 — Instagram Reels publishing (replaces the planned TikTok step)
+
+### Step 8 — What works today (clip rendering)
+
+The user clicks **Render clip** on any highlight; the worker enqueues a
+`render` job that:
+
+1. **Scene-snaps** the start/end to the nearest content cut within ±1.5 s
+   using PySceneDetect — cleaner ins and outs than raw AI timestamps.
+2. **Cuts + reformats** with ffmpeg. For vertical output from a landscape
+   source we use the industry-standard *blurred-background fill*: a
+   scaled, boxblurred copy of the same frame sits behind the centered
+   original. No black bars.
+3. **Normalizes audio** with `loudnorm=I=-16:TP=-1.5:LRA=11` so a series
+   of clips don't jump in volume between cuts.
+4. **Extracts a dominant color** from the middle frame using Pillow's
+   k-means quantizer. Saved to `clips.dominant_color` and used in Step 9
+   to gradient captions toward a contrasting hue.
+5. Writes the final file to
+   `data/videos/<project>/clips/<clip_id>/clip.mp4` and updates the
+   `clips` row to `status = "ready"`.
+
+Default output sizes: **1080×1920 (9:16)**, 1080×1080 (1:1), 1920×1080
+(16:9). All clips are h.264 + AAC + faststart, ready for direct upload to
+any platform.
+
+### Step 9 — What works today (captions)
+
+The Render dialog has a **Burn captions immediately** toggle (on by default)
+and a full style picker:
+
+- **Style preset** (4 options):
+  - `highlight` — current word in primary color, full line in accent
+  - `popup`     — each word springs in with a tiny scale animation
+  - `karaoke`   — line stays on screen, sweeps through words (libass `\k`)
+  - `minimal`   — clean static block, no per-word animation
+- **Font** (6 options): Anton, Bebas Neue, Inter, Montserrat, Permanent
+  Marker, Roboto Mono.
+- **Auto-color** (default ON): caption gradient is derived from the clip's
+  dominant frame color — picks a high-contrast `(primary, accent)` pair
+  using a luminance heuristic. Disabling auto-color reveals two color
+  pickers for manual control.
+- **UPPERCASE** toggle.
+
+Captions are baked into a sibling `clip-captioned.mp4` via ffmpeg's
+`subtitles` filter (libass). Rendering is ~2–5 s per clip on a typical
+laptop. The `packages/remotion/` package contains a parallel React-based
+implementation that can be swapped in for richer animations later — see
+its README for the swap point.
+
+After a clip is rendered the **Rendered clips** card shows it with an
+inline `<video>` preview, **Restyle captions** / **Schedule upload** /
+**Download** / **Delete** actions, and a thumbnail of the dominant color.
+
+### Step 11 — What works today (live progress / SSE)
+
+- `GET /api/projects/<id>/events` opens a Server-Sent Events stream.
+- The route polls the DB every 750 ms and ONLY pushes a new event when the
+  digest of the project snapshot changes (idle projects → near-zero
+  traffic).
+- Each `snapshot` event triggers `router.refresh()` on the client, so the
+  UI updates within ~1 second of any state change (job progress, clip
+  status, upload status) without a full reload.
+- Keepalive comments every 20 s keep proxies/Next dev server happy.
+- 15-minute cap on a single stream lifetime so abandoned tabs eventually
+  release the connection.
+
+### Step 12 + 13 — What works today (scheduled uploads)
+
+Each rendered clip has a **Schedule upload** dialog that lets the user:
+
+- Pick **one or both** of YouTube + Instagram (post to both simultaneously).
+- Choose **Post now** or **Schedule for** a wall-clock time + IANA
+  timezone. **Default timezone is `America/Chicago` (Central)** per spec.
+- Provide title, description (multi-line), tags (comma-separated).
+- Choose visibility: **Private** (default), Unlisted, Public.
+  - YouTube respects this; Instagram Reels are always public.
+
+Submitting writes a `scheduled_uploads` row. If the chosen time is "now"
+the publish job is enqueued immediately; otherwise the worker's
+**scheduler tick** (runs every 15 s as part of the job loop) picks up
+due rows and enqueues publish jobs at the right moment.
+
+The Python `publish` job:
+
+- Reads tokens from the `accounts` table (manage on `/accounts`).
+- For YouTube: refreshes the access token via OAuth2 if the API returns
+  401 and `YOUTUBE_CLIENT_ID` / `_SECRET` are set; otherwise raises
+  `AuthExpiredError` and the upload is marked failed (non-retryable) so
+  the user reconnects.
+- For Instagram: builds a public HTTPS URL from `NEXT_PUBLIC_APP_URL` +
+  `/api/media/<clip>` and runs the three-step Reels flow
+  (`POST /me/media` container → poll `status_code` until `FINISHED` →
+  `POST /me/media_publish`). The long-lived token (60 days) is
+  auto-refreshed on 401 via `/refresh_access_token`. Captions become the
+  IG caption with the user's tags appended as hashtags.
+- Uploads as **private by default** on platforms that support it.
+
+OAuth setup
+-----------
+Click **Connect with YouTube** or **Connect with Instagram** on
+`/accounts`. The full OAuth flows are wired end-to-end —
+`/api/auth/{youtube,instagram}/start` redirects to the provider,
+`/callback` exchanges the code for tokens, fetches a human-readable
+label (channel name / `@username`), and upserts the account row. See
+`.env.example` for the developer-console setup steps.
+
+For Instagram specifically: the account **must** be Business or Creator,
+must be added as a tester in the Meta app dashboard, and your
+`NEXT_PUBLIC_APP_URL` must be a public HTTPS URL (use a Cloudflared or
+ngrok tunnel for local dev) — Instagram fetches the video from that URL.
+
+### Worker tools (`/admin`, `pnpm worker:reset`)
+
+Visit `/admin` for a live worker-health dashboard with one-click cleanup
+buttons (heal stuck workers, cancel pending jobs, prune finished jobs,
+delete failed projects). When the worker itself is unresponsive, run
+`pnpm worker:reset` in a terminal — it kills any zombie uvicorn
+processes, frees port 8000, and resets stuck DB state.
+
+### Verify Step 8 + 9 + 11 + 12
+
+```powershell
+# Worker-side smoke checks (no model loading, no rendering).
+cd apps\worker
+.venv\Scripts\python scripts\smoke_render.py    # render + caption + publish
+
+# Web-side typecheck (no asChild errors expected).
+cd ..\..\apps\web
+npx tsc --noEmit
+```
+
+End-to-end: create a project, wait for it to reach **highlights ready**,
+click **Render clip** on any highlight (turn on captions, pick a style),
+wait for the **Rendered clips** card to show the preview, then click
+**Schedule upload** to either post now or queue for a future Central-time
+slot.
 
 ## Cost estimate (per 5-hour VOD)
 
@@ -286,5 +422,5 @@ summaries, and per-signal breakdown chips.
 | Clip render | FFmpeg (local) | $0 |
 | Captions | Remotion (local) | $0 |
 | Thumbnails | Frame extract + Satori (local) | $0 |
-| Upload | YouTube / TikTok APIs | $0 |
+| Upload | YouTube / Instagram APIs | $0 |
 | **Total** | | **~$0.10** |

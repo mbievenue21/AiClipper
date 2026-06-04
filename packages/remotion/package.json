@@ -1,0 +1,20 @@
+{
+  "name": "@aiclipper/remotion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remotion compositions for AiClipper captioned clips. Currently used as a future-expansion path; the production caption pipeline uses ffmpeg + libass (see apps/worker/worker/render/captions.py) for ~100x faster rendering.",
+  "scripts": {
+    "preview": "remotion preview src/index.ts",
+    "render": "remotion render src/index.ts CaptionedClip out.mp4 --props=props.json"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "remotion": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -9,11 +9,14 @@
     "setup": "py -3 -m venv .venv && .venv\\Scripts\\pip install -e .",
     "setup:ingest": ".venv\\Scripts\\pip install -e .[ingest]",
     "setup:transcribe": ".venv\\Scripts\\pip install -e .[transcribe]",
+    "setup:transcribe-groq": ".venv\\Scripts\\pip install -e .[transcribe-groq]",
     "setup:analyze": ".venv\\Scripts\\pip install -e .[analyze]",
     "setup:render": ".venv\\Scripts\\pip install -e .[render]",
     "setup:upload": ".venv\\Scripts\\pip install -e .[upload]",
     "reset": ".venv\\Scripts\\python scripts\\reset_workers.py",
     "reset:dry": ".venv\\Scripts\\python scripts\\reset_workers.py --dry-run",
+    "whisper:warm": ".venv\\Scripts\\python scripts\\warm_whisper.py",
+    "retry:transcribe": ".venv\\Scripts\\python scripts\\retry_transcribe.py",
     "lint": ".venv\\Scripts\\python -m ruff check ."
   }
 }

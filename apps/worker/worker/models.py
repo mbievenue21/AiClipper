@@ -203,12 +203,23 @@ class Highlight(Base):
     summary: Mapped[str | None] = mapped_column(Text)
     reason_json: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="candidate")
+    generated_metadata_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
 
     video: Mapped[Video] = relationship(back_populates="highlights")
     clips: Mapped[list["Clip"]] = relationship(
         back_populates="highlight", cascade="all, delete-orphan"
     )
+
+
+_DEFAULT_CAPTION_SETTINGS: dict[str, Any] = {
+    "font": "anton",
+    "style": "highlight",
+    "autoColor": True,
+    "primaryColor": "#FFD700",
+    "accentColor": "#FFFFFF",
+    "uppercase": True,
+}
 
 
 class Clip(Base):
@@ -219,23 +230,47 @@ class Clip(Base):
         Text, ForeignKey("highlights.id", ondelete="CASCADE"), nullable=False
     )
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    captioned_file_path: Mapped[str | None] = mapped_column(Text)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)
     duration_seconds: Mapped[float | None] = mapped_column(Float)
+    width_px: Mapped[int | None] = mapped_column(Integer)
+    height_px: Mapped[int | None] = mapped_column(Integer)
     aspect: Mapped[str] = mapped_column(Text, nullable=False)  # 16:9 | 9:16 | 1:1
     has_captions: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="rendering")
+    dominant_color: Mapped[str | None] = mapped_column(Text)
+    caption_style_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
+    )
 
     highlight: Mapped[Highlight] = relationship(back_populates="clips")
     uploads: Mapped[list["ScheduledUpload"]] = relationship(
         back_populates="clip", cascade="all, delete-orphan"
     )
 
+    @property
+    def caption_style(self) -> dict[str, Any]:
+        out = dict(_DEFAULT_CAPTION_SETTINGS)
+        if self.caption_style_json:
+            try:
+                out.update(json.loads(self.caption_style_json))
+            except json.JSONDecodeError:
+                pass
+        return out
+
+    @caption_style.setter
+    def caption_style(self, value: dict[str, Any]) -> None:
+        self.caption_style_json = json.dumps(value) if value is not None else None
+
 
 class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)  # youtube|tiktok|instagram
+    platform: Mapped[str] = mapped_column(Text, nullable=False)  # youtube|instagram
     label: Mapped[str] = mapped_column(Text, nullable=False)
     access_token: Mapped[str] = mapped_column(Text, nullable=False)
     refresh_token: Mapped[str | None] = mapped_column(Text)
@@ -257,20 +292,32 @@ class ScheduledUpload(Base):
     account_id: Mapped[str] = mapped_column(
         Text, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
     )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)  # youtube | instagram
     title: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     tags_json: Mapped[str | None] = mapped_column(Text)
+    visibility: Mapped[str] = mapped_column(Text, nullable=False, default="private")
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="America/Chicago")
     scheduled_for: Mapped[int] = mapped_column(BigInteger, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     external_id: Mapped[str | None] = mapped_column(Text)
     external_url: Mapped[str | None] = mapped_column(Text)
     error_message: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
     updated_at: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
     )
 
     clip: Mapped[Clip] = relationship(back_populates="uploads")
+
+    @property
+    def tags(self) -> list[str]:
+        return json.loads(self.tags_json) if self.tags_json else []
+
+    @tags.setter
+    def tags(self, value: list[str] | None) -> None:
+        self.tags_json = json.dumps(value) if value else None
 
 
 class Job(Base):

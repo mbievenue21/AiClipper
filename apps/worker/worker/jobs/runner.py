@@ -74,7 +74,22 @@ class JobRunner:
         log.info("job_runner_stopped")
 
     async def _loop(self) -> None:
+        # Tick the scheduler every N seconds so due uploads get enqueued
+        # automatically. Cheap (one indexed query) so we run it frequently.
+        last_scheduler_tick = 0.0
+        scheduler_interval_s = 15.0
+
         while not self._stop_event.is_set():
+            now = asyncio.get_event_loop().time()
+            if now - last_scheduler_tick >= scheduler_interval_s:
+                last_scheduler_tick = now
+                try:
+                    enqueued = queue.enqueue_due_uploads()
+                    if enqueued:
+                        log.info("scheduler_tick_enqueued", count=len(enqueued))
+                except Exception:
+                    log.exception("scheduler_tick_failed")
+
             try:
                 job = queue.claim_next()
             except Exception:

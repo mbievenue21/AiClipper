@@ -36,6 +36,11 @@ transcribe = [
     # faster-whisper bundles CTranslate2; CUDA libs come from the system.
     "faster-whisper>=1.1.0",
 ]
+# Optional hosted Whisper backend — used when TRANSCRIBE_BACKEND=groq.
+# Pinned to >=0.11 because earlier groq SDKs lacked verbose_json + word timings.
+transcribe-groq = [
+    "groq>=0.11,<1.0",
+]
 # Installed in Step 7 (highlight analysis)
 analyze = [
     "librosa>=0.10.2",

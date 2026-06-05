@@ -26,6 +26,7 @@ import {
   type TrendingTag,
 } from "@/lib/youtube/trending";
 import { hasYouTubeAccount, YouTubeClientError } from "@/lib/youtube/client";
+import { sanitizeYouTubeTags } from "@/lib/youtube/tags";
 import { parseTranscript, TranscriptParseError } from "@/lib/transcripts/parse";
 
 const captionStyleSchema = z.object({
@@ -319,10 +320,12 @@ export async function scheduleUploadAction(
     };
   }
 
-  const tagsArray = (data.tags || "")
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
+  const tagsArray = sanitizeYouTubeTags(
+    (data.tags || "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean),
+  );
 
   const inserted = db
     .insert(schema.scheduledUploads)

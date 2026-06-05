@@ -161,7 +161,12 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
             _set_project_status(session, project, "analyzing")
 
     # Chain: TwelveLabs index/analyze (if enabled) → analyze.
-    next_job = enqueue_post_transcribe(project_id, video_id)
+    run_id = str(payload.get("pipeline_run_id") or "")
+    next_job = enqueue_post_transcribe(
+        project_id,
+        video_id,
+        pipeline_run_id=run_id or None,
+    )
 
     progress(1.0, "transcribe complete")
     log.info(

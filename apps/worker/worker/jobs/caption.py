@@ -21,7 +21,12 @@ from ..config import get_settings
 from ..db import session_scope
 from ..media.paths import rel_path
 from ..models import Clip, Highlight, Transcript, TranscriptSegment, Video
-from ..render.captions import chunk_segments, segments_from_overrides, write_ass_file
+from ..render.captions import (
+    chunk_segments,
+    resolve_caption_source_window,
+    segments_from_overrides,
+    write_ass_file,
+)
 from ..render.ffmpeg import burn_subtitles
 from .handlers import ProgressReporter, register
 
@@ -73,12 +78,23 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
         if transcript is None:
             raise ValueError("Cannot add captions: no transcript for this video.")
 
+        h_start = float(highlight.start_seconds)
+        h_end = float(highlight.end_seconds)
+        source_start, source_end = resolve_caption_source_window(
+            highlight_start=h_start,
+            highlight_end=h_end,
+            source_start=clip.source_start_seconds,
+            source_end=clip.source_end_seconds,
+            trim_start=clip.trim_start_seconds,
+            trim_end=clip.trim_end_seconds,
+        )
+
         seg_rows = (
             session.execute(
                 select(TranscriptSegment)
                 .where(TranscriptSegment.transcript_id == transcript.id)
-                .where(TranscriptSegment.end_seconds >= highlight.start_seconds)
-                .where(TranscriptSegment.start_seconds <= highlight.end_seconds)
+                .where(TranscriptSegment.end_seconds >= source_start)
+                .where(TranscriptSegment.start_seconds <= source_end)
                 .order_by(TranscriptSegment.start_seconds)
             )
             .scalars()
@@ -100,8 +116,6 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
         merged_style: dict[str, Any] = {**current_style, **(style_in or {})}
 
         clip_input_path_rel = clip.file_path
-        h_start = float(highlight.start_seconds)
-        h_end = float(highlight.end_seconds)
         width_px = int(clip.width_px or 1080)
         height_px = int(clip.height_px or 1920)
         dominant_hex = clip.dominant_color
@@ -123,16 +137,13 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
 
     # Phase 2: chunk transcript into caption segments scoped to the clip.
     progress(0.30, "chunking transcript into caption lines")
-    # Pick max-chars to match the aspect ratio. Portrait is the tight one —
-    # use 22 by default so wide display fonts (Anton/Bebas) stay inside the
-    # 90% safe area at the auto-computed font size. Square / landscape get
-    # roomier counts.
+    # Short-form line length: ~6–8 words per line, max 2 lines.
     if width_px < height_px:
-        chars_per_line = 22
+        chars_per_line = 18
     elif width_px == height_px:
-        chars_per_line = 32
+        chars_per_line = 24
     else:
-        chars_per_line = 38
+        chars_per_line = 32
     # Propagate to build_ass so font-size auto-sizing uses the same number.
     merged_style = {**merged_style, "maxCharsPerLine": chars_per_line}
 
@@ -144,8 +155,8 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
     else:
         segments = chunk_segments(
             raw_segments,
-            clip_start=h_start,
-            clip_end=h_end,
+            clip_start=source_start,
+            clip_end=source_end,
             max_chars_per_line=chars_per_line,
         )
 

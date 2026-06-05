@@ -21,6 +21,7 @@ from ..providers.twelvelabs_upload_plan import plan_upload_chunks
 from . import queue
 from .cancellation import JobCancelled, make_should_stop
 from .handlers import ProgressReporter, register
+from .pipeline_enqueue import forward_payload
 
 log = structlog.get_logger(__name__)
 
@@ -46,7 +47,7 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
         log.info("twelvelabs_index_skipped_disabled", project_id=project_id)
         next_job = queue.enqueue(
             "analyze",
-            {"project_id": project_id, "video_id": video_id},
+            forward_payload(payload, project_id=project_id, video_id=video_id),
             project_id=project_id,
         )
         return {"skipped": True, "reason": "disabled", "next_job_id": next_job.id}
@@ -55,7 +56,7 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
         log.warning("twelvelabs_index_skipped_no_api_key", project_id=project_id)
         next_job = queue.enqueue(
             "analyze",
-            {"project_id": project_id, "video_id": video_id},
+            forward_payload(payload, project_id=project_id, video_id=video_id),
             project_id=project_id,
         )
         return {"skipped": True, "reason": "missing_api_key", "next_job_id": next_job.id}
@@ -64,7 +65,7 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
         log.warning("twelvelabs_index_skipped_no_index_id", project_id=project_id)
         next_job = queue.enqueue(
             "analyze",
-            {"project_id": project_id, "video_id": video_id},
+            forward_payload(payload, project_id=project_id, video_id=video_id),
             project_id=project_id,
         )
         return {"skipped": True, "reason": "missing_index_id", "next_job_id": next_job.id}
@@ -123,7 +124,7 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
         )
         next_job = queue.enqueue(
             "twelvelabs_analyze",
-            {"project_id": project_id, "video_id": video_id},
+            forward_payload(payload, project_id=project_id, video_id=video_id),
             project_id=project_id,
         )
         return {
@@ -159,7 +160,7 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
         if settings.twelvelabs_fail_open:
             next_job = queue.enqueue(
                 "analyze",
-                {"project_id": project_id, "video_id": video_id},
+                forward_payload(payload, project_id=project_id, video_id=video_id),
                 project_id=project_id,
             )
             return {"failed_open": True, "error": str(exc)[:500], "next_job_id": next_job.id}
@@ -221,7 +222,7 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
         if settings.twelvelabs_fail_open:
             next_job = queue.enqueue(
                 "analyze",
-                {"project_id": project_id, "video_id": video_id},
+                forward_payload(payload, project_id=project_id, video_id=video_id),
                 project_id=project_id,
             )
             return {

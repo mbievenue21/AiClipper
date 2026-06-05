@@ -37,6 +37,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type { GeneratedUploadMetadata } from "@/lib/db/schema";
+import { normalizeYouTubeTag } from "@/lib/youtube/tags";
 
 import {
   generateMetadataAction,
@@ -295,9 +296,7 @@ export function ScheduleUploadDialog({
   };
 
   const addTagFromDraft = () => {
-    const raw = tagDraft.trim().replace(/^#+/, "").toLowerCase();
-    if (!raw) return;
-    const cleaned = raw.replace(/[^a-z0-9 _-]/g, "").trim();
+    const cleaned = normalizeYouTubeTag(tagDraft);
     if (!cleaned) return;
     if (tags.includes(cleaned)) {
       setTagDraft("");
@@ -328,11 +327,7 @@ export function ScheduleUploadDialog({
     const parts = text.split(",").map((p) => p.trim()).filter(Boolean);
     const next = [...tags];
     for (const p of parts) {
-      const cleaned = p
-        .replace(/^#+/, "")
-        .toLowerCase()
-        .replace(/[^a-z0-9 _-]/g, "")
-        .trim();
+      const cleaned = normalizeYouTubeTag(p);
       if (cleaned && !next.includes(cleaned) && next.length < TAG_LIMIT) {
         next.push(cleaned);
       }
@@ -344,12 +339,7 @@ export function ScheduleUploadDialog({
   const removeTag = (t: string) => setTags(tags.filter((x) => x !== t));
 
   const addTagFromSuggestion = (raw: string) => {
-    const cleaned = raw
-      .trim()
-      .toLowerCase()
-      .replace(/^#+/, "")
-      .replace(/[^a-z0-9 _-]/g, "")
-      .trim();
+    const cleaned = normalizeYouTubeTag(raw);
     if (!cleaned) return;
     if (tags.includes(cleaned)) return; // silent — chip will disappear anyway
     if (tags.length >= TAG_LIMIT) {

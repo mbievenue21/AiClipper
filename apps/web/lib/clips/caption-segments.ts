@@ -34,9 +34,16 @@ export function resolveEditorCaptionSegments(
   clipEnd: number,
   trimStart: number,
   trimEnd: number,
+  sourceStart?: number | null,
+  sourceEnd?: number | null,
+  /** When true (live trim drag), recompute from highlight bounds + trim. */
+  preferHighlightTrim = false,
 ): CaptionSegmentOverride[] {
-  const effectiveStart = clipStart + trimStart;
-  const effectiveEnd = clipEnd - trimEnd;
+  const hasSourceWindow =
+    !preferHighlightTrim && sourceStart != null && sourceEnd != null;
+  const effectiveStart = hasSourceWindow ? sourceStart! : clipStart + trimStart;
+  const effectiveEnd = hasSourceWindow ? sourceEnd! : clipEnd - trimEnd;
+  const trimOffset = hasSourceWindow ? 0 : trimStart;
   const base =
     stored && stored.length > 0
       ? stored
@@ -49,8 +56,8 @@ export function resolveEditorCaptionSegments(
   const duration = Math.max(0.1, effectiveEnd - effectiveStart);
   return base
     .map((s) => ({
-      start: Math.max(0, s.start - trimStart),
-      end: Math.min(duration, s.end - trimStart),
+      start: Math.max(0, s.start - trimOffset),
+      end: Math.min(duration, s.end - trimOffset),
       text: s.text,
     }))
     .filter((s) => s.end > s.start && s.text.trim());

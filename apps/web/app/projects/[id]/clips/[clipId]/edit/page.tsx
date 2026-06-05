@@ -74,6 +74,8 @@ export default async function ClipEditPage({ params }: PageProps) {
       sourceDuration={video.durationSeconds ?? highlight.endSeconds}
       highlightStart={highlight.startSeconds}
       highlightEnd={highlight.endSeconds}
+      sourceStart={clip.sourceStartSeconds}
+      sourceEnd={clip.sourceEndSeconds}
       storedTrimStart={clip.trimStartSeconds ?? 0}
       storedTrimEnd={clip.trimEndSeconds ?? 0}
       storedCaptionSegments={storedSegments}

@@ -252,6 +252,8 @@ class Clip(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="rendering")
     dominant_color: Mapped[str | None] = mapped_column(Text)
     caption_style_json: Mapped[str | None] = mapped_column(Text)
+    source_start_seconds: Mapped[float | None] = mapped_column(Float)
+    source_end_seconds: Mapped[float | None] = mapped_column(Float)
     trim_start_seconds: Mapped[float | None] = mapped_column(Float)
     trim_end_seconds: Mapped[float | None] = mapped_column(Float)
     caption_segments_json: Mapped[str | None] = mapped_column(Text)
@@ -474,3 +476,54 @@ class Job(Base):
     @result.setter
     def result(self, value: dict[str, Any] | None) -> None:
         self.result_json = json.dumps(value) if value is not None else None
+
+
+class PipelineRun(Base):
+    __tablename__ = "pipeline_runs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    started_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    finished_at: Mapped[int | None] = mapped_column(BigInteger)
+    video_duration_seconds: Mapped[float | None] = mapped_column(Float)
+    twelvelabs_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_reanalysis: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    meta_json: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        return json.loads(self.meta_json) if self.meta_json else {}
+
+    @meta.setter
+    def meta(self, value: dict[str, Any]) -> None:
+        self.meta_json = json.dumps(value) if value else None
+
+
+class PipelineStageTiming(Base):
+    __tablename__ = "pipeline_stage_timings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    run_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("pipeline_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[int | None] = mapped_column(BigInteger)
+    finished_at: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="ok")
+    job_id: Mapped[str | None] = mapped_column(Text)
+    meta_json: Mapped[str | None] = mapped_column(Text)
+
+    @property
+    def meta(self) -> dict[str, Any]:
+        return json.loads(self.meta_json) if self.meta_json else {}
+
+    @meta.setter
+    def meta(self, value: dict[str, Any]) -> None:
+        self.meta_json = json.dumps(value) if value else None

@@ -24,6 +24,7 @@ from ..providers.twelvelabs_client import TwelveLabsClient
 from ..providers.twelvelabs_types import TwelveLabsPromptContext, VisualSegmentResult
 from . import queue
 from .handlers import ProgressReporter, register
+from .pipeline_enqueue import forward_payload
 
 log = structlog.get_logger(__name__)
 
@@ -44,15 +45,16 @@ async def handle_twelvelabs_analyze(job, progress: ProgressReporter) -> dict[str
         log.info("twelvelabs_analyze_skipped", project_id=project_id)
         next_job = queue.enqueue(
             "analyze",
-            {
-                "project_id": project_id,
-                "video_id": video_id,
+            forward_payload(
+                payload,
+                project_id=project_id,
+                video_id=video_id,
                 **{
                     k: v
                     for k, v in payload.items()
                     if k.startswith("analyze_") or k.endswith("_override")
                 },
-            },
+            ),
             project_id=project_id,
         )
         return {"skipped": True, "next_job_id": next_job.id}
@@ -80,7 +82,7 @@ async def handle_twelvelabs_analyze(job, progress: ProgressReporter) -> dict[str
             log.warning("twelvelabs_analyze_no_ready_index", project_id=project_id)
             next_job = queue.enqueue(
                 "analyze",
-                {"project_id": project_id, "video_id": video_id},
+                forward_payload(payload, project_id=project_id, video_id=video_id),
                 project_id=project_id,
             )
             return {"skipped": True, "reason": "index_not_ready", "next_job_id": next_job.id}
@@ -157,7 +159,7 @@ async def handle_twelvelabs_analyze(job, progress: ProgressReporter) -> dict[str
         if settings.twelvelabs_fail_open:
             next_job = queue.enqueue(
                 "analyze",
-                {"project_id": project_id, "video_id": video_id},
+                forward_payload(payload, project_id=project_id, video_id=video_id),
                 project_id=project_id,
             )
             return {"failed_open": True, "error": str(exc)[:500], "next_job_id": next_job.id}
@@ -169,12 +171,13 @@ async def handle_twelvelabs_analyze(job, progress: ProgressReporter) -> dict[str
     progress(0.9, "saving visual segments")
     _persist_segments_and_candidates(project_id, video_id, segments)
 
-    analyze_payload = {
-        "project_id": project_id,
-        "video_id": video_id,
-        "twelvelabs_used": True,
-        "upload_chunk_count": total_chunks,
-    }
+    analyze_payload = forward_payload(
+        payload,
+        project_id=project_id,
+        video_id=video_id,
+        twelvelabs_used=True,
+        upload_chunk_count=total_chunks,
+    )
     for key in ("analyze_model_override", "vibe_override", "reanalysis_mode"):
         if key in payload:
             analyze_payload[key] = payload[key]

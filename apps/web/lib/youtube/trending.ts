@@ -20,6 +20,7 @@
 import "server-only";
 
 import { youtubeFetch, YouTubeClientError } from "./client";
+import { YOUTUBE_MAX_TAG_LEN } from "./tags";
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -48,7 +49,7 @@ const JUNK_TAG_PATTERN = /^[\d\s]+$|^[^a-z0-9]+$/i;
 function normalizeTag(raw: string): string | null {
   const t = raw.trim().toLowerCase();
   if (!t) return null;
-  if (t.length < 2 || t.length > 40) return null;
+  if (t.length < 2 || t.length > YOUTUBE_MAX_TAG_LEN) return null;
   if (JUNK_TAG_PATTERN.test(t)) return null;
   // Drop tags that are purely punctuation or single characters once stripped.
   const stripped = t.replace(/[^a-z0-9 _-]/g, "").trim();

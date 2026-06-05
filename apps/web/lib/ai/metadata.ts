@@ -23,6 +23,7 @@
 import "server-only";
 
 import { db, schema } from "@/lib/db/client";
+import { sanitizeYouTubeTags } from "@/lib/youtube/tags";
 import {
   DEFAULT_PROJECT_SETTINGS,
   type GeneratedUploadMetadata,
@@ -301,23 +302,9 @@ function tryParseJsonWithSalvage(raw: string): MetadataPayload {
   }
 }
 
-/** Trim, dedupe, lowercase tags; strip leading # and stray punctuation. */
+/** Trim, dedupe, lowercase tags; enforce YouTube API limits. */
 function sanitizeTags(input: string[] | undefined): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of input ?? []) {
-    let t = String(raw).trim().toLowerCase();
-    t = t.replace(/^#+/, "");
-    t = t.replace(/[^a-z0-9\s_-]/g, "").trim();
-    t = t.replace(/\s+/g, " ");
-    if (!t) continue;
-    const key = t;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(t);
-    if (out.length >= 20) break;
-  }
-  return out;
+  return sanitizeYouTubeTags(input).slice(0, 20);
 }
 
 function sanitize(payload: MetadataPayload): MetadataPayload {

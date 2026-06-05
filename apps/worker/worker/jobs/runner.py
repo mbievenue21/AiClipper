@@ -19,6 +19,7 @@ import structlog
 
 from ..config import get_settings
 from ..logging import get_logger
+from ..pipeline_timing import complete_run, record_job_timing
 from . import cancellation, handlers, queue
 
 log = get_logger(__name__)
@@ -167,6 +168,8 @@ class JobRunner:
                 queue.update_progress(job_id, progress, message)
 
             structlog.contextvars.bind_contextvars(job_id=job_id, job_type=job_type)
+            job_obj = None
+            result: dict | None = None
             try:
                 # Re-fetch the job inside the handler scope so handlers get a
                 # fresh, attached ORM object.
@@ -183,6 +186,21 @@ class JobRunner:
                 result = await handler(job_obj, report)
                 queue.mark_succeeded(job_id, result)
                 bound_log.info("job_succeeded")
+                if job_obj is not None:
+                    payload = job_obj.payload
+                    project_id = job_obj.project_id or payload.get("project_id")
+                    skipped = bool(isinstance(result, dict) and result.get("skipped"))
+                    record_job_timing(
+                        job_id,
+                        job_type,
+                        str(project_id) if project_id else None,
+                        payload,
+                        skipped=skipped,
+                        meta={"result_keys": list(result.keys())[:12]} if result else None,
+                    )
+                    run_id = payload.get("pipeline_run_id")
+                    if job_type == "analyze" and run_id and not skipped:
+                        complete_run(str(run_id), status="complete")
             except cancellation.JobCancelled as exc:
                 # Graceful, expected unwind — don't retry, don't log a stack.
                 bound_log.info("job_cancelled", reason=str(exc))
@@ -195,7 +213,21 @@ class JobRunner:
                 raise
             except Exception as exc:
                 bound_log.exception("job_failed")
-                queue.mark_failed(job_id, f"{exc}\n{traceback.format_exc()}")
+                err_text = f"{exc}\n{traceback.format_exc()}"
+                queue.mark_failed(job_id, err_text)
+                if job_obj is not None:
+                    payload = job_obj.payload
+                    project_id = job_obj.project_id or payload.get("project_id")
+                    record_job_timing(
+                        job_id,
+                        job_type,
+                        str(project_id) if project_id else None,
+                        payload,
+                        error=str(exc),
+                    )
+                    run_id = payload.get("pipeline_run_id")
+                    if job_type == "analyze" and run_id:
+                        complete_run(str(run_id), status="failed")
             finally:
                 structlog.contextvars.unbind_contextvars("job_id", "job_type")
 

@@ -10,8 +10,9 @@ per clip) and the output is identical regardless of OS.
 The Remotion package at packages/remotion is kept around for future use
 (richer animations) but the default caption pipeline goes through here.
 
-Output positioning: captions sit at vertical center 80% — well above the
-TikTok/Reels UI overlay on the bottom 20% of the screen.
+Output positioning: captions sit in the lower blurred band (ASS alignment 2,
+~22% above the bottom edge) so they never cover centered gameplay on 9:16
+portrait clips with blurred-fill letterboxing.
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ from pathlib import Path
 from typing import Any
 
 from .dominant_color import contrasting_pair, hex_to_rgb
+
+# Short-form caption blocks: ~1–2 lines, 6–8 words, never edge-to-edge.
+_MAX_WORDS_PER_CAPTION = 8
+_MAX_LINES_PER_CAPTION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -126,12 +131,29 @@ def _format_ass_time(seconds: float) -> str:
     return f"{h:01d}:{m:02d}:{s:05.2f}"
 
 
+def resolve_caption_source_window(
+    *,
+    highlight_start: float,
+    highlight_end: float,
+    source_start: float | None = None,
+    source_end: float | None = None,
+    trim_start: float | None = None,
+    trim_end: float | None = None,
+) -> tuple[float, float]:
+    """Return absolute source-video [start, end] that matches the rendered clip."""
+    if source_start is not None and source_end is not None:
+        return float(source_start), float(source_end)
+    ts = max(0.0, float(trim_start or 0.0))
+    te = max(0.0, float(trim_end or 0.0))
+    return highlight_start + ts, highlight_end - te
+
+
 def chunk_segments(
     raw_segments: list[dict[str, Any]],
     *,
     clip_start: float,
     clip_end: float,
-    max_chars_per_line: int = 22,
+    max_chars_per_line: int = 18,
 ) -> list[CaptionSegment]:
     """Build CaptionSegments from raw transcript segments scoped to the clip.
 
@@ -139,21 +161,18 @@ def chunk_segments(
     ``text``, and optionally ``words`` (list of {word/text, start, end}).
 
     Times are converted to clip-relative seconds (0 = start of clip).
-    Lines longer than ``max_chars_per_line`` are split on word boundaries
-    so captions never overflow the safe area on vertical video.
-
-    Tuned for portrait 9:16 with bold display fonts (Anton/Bebas). For wider
-    aspects the caller can pass a larger ``max_chars_per_line``.
+    Word-level timings from Whisper/Groq are preferred when present.
     """
+    clip_duration = max(0.01, clip_end - clip_start)
     out: list[CaptionSegment] = []
 
     for raw in raw_segments:
-        seg_start = float(raw.get("start_seconds", 0.0))
-        seg_end = float(raw.get("end_seconds", seg_start))
-        if seg_end <= clip_start or seg_start >= clip_end:
+        abs_seg_start = float(raw.get("start_seconds", 0.0))
+        abs_seg_end = float(raw.get("end_seconds", abs_seg_start))
+        if abs_seg_end <= clip_start or abs_seg_start >= clip_end:
             continue
-        seg_start = max(seg_start, clip_start) - clip_start
-        seg_end = min(seg_end, clip_end) - clip_start
+        rel_seg_start = max(abs_seg_start, clip_start) - clip_start
+        rel_seg_end = min(abs_seg_end, clip_end) - clip_start
 
         words_data = raw.get("words") or []
         words: list[CaptionWord] = []
@@ -163,13 +182,16 @@ def chunk_segments(
             )
             if not text:
                 continue
-            ws = float(w.get("start", seg_start)) - clip_start
-            we = float(w.get("end", we_default := ws + 0.3)) - clip_start
-            _ = we_default
-            if we <= 0 or ws >= clip_end - clip_start:
+            abs_ws = float(w.get("start", abs_seg_start))
+            abs_we = float(w.get("end", abs_ws + 0.3))
+            if abs_we <= clip_start or abs_ws >= clip_end:
                 continue
+            ws = max(0.0, abs_ws - clip_start)
+            we = min(clip_duration, abs_we - clip_start)
+            if we <= ws:
+                we = min(clip_duration, ws + 0.12)
             words.append(
-                CaptionWord(text=text, start=max(0.0, ws), end=max(ws + 0.05, we))
+                CaptionWord(text=text, start=ws, end=max(ws + 0.05, we))
             )
 
         # Fall back to even-time-split per word if word-level timing missing.
@@ -178,31 +200,59 @@ def chunk_segments(
             tokens = raw_text.split()
             if not tokens:
                 continue
-            total = max(0.01, seg_end - seg_start)
+            total = max(0.01, rel_seg_end - rel_seg_start)
             per = total / len(tokens)
             for i, tok in enumerate(tokens):
-                ws = seg_start + i * per
+                ws = rel_seg_start + i * per
                 words.append(CaptionWord(text=tok, start=ws, end=ws + per))
 
-        # Re-chunk into lines no wider than max_chars_per_line. We allow a
-        # single caption to span up to 2 visual lines (separated by \N in
-        # ASS) so longer sentences still get displayed in one continuous
-        # subtitle block rather than rapid-fire single-line flicker.
-        line: list[CaptionWord] = []
+        # Re-chunk into short blocks (≤8 words, ≤2 lines) for short-form style.
+        block: list[CaptionWord] = []
+        line_words: list[CaptionWord] = []
         line_len = 0
-        for w in words:
-            cost = len(w.text) + (1 if line else 0)
-            if line and line_len + cost > max_chars_per_line:
+        line_count = 1
+
+        def flush_block() -> None:
+            if block:
                 out.append(
-                    CaptionSegment(start=line[0].start, end=line[-1].end, words=line)
+                    CaptionSegment(
+                        start=block[0].start,
+                        end=block[-1].end,
+                        words=block,
+                    )
                 )
-                line, line_len = [], 0
-            line.append(w)
-            line_len += cost
-        if line:
-            out.append(
-                CaptionSegment(start=line[0].start, end=line[-1].end, words=line)
+
+        for w in words:
+            cost = len(w.text) + (1 if line_words else 0)
+            need_break = (
+                line_words
+                and line_len + cost > max_chars_per_line
+                and line_count < _MAX_LINES_PER_CAPTION
             )
+            if need_break:
+                block.extend(line_words)
+                line_words, line_len = [], 0
+                line_count += 1
+            elif line_words and line_len + cost > max_chars_per_line:
+                flush_block()
+                block, line_words, line_len = [], [], 0
+                line_count = 1
+
+            if len(block) + len(line_words) >= _MAX_WORDS_PER_CAPTION:
+                if line_words:
+                    block.extend(line_words)
+                    line_words, line_len = [], 0
+                flush_block()
+                block, line_words, line_len = [], [], 0
+                line_count = 1
+
+            line_words.append(w)
+            line_len += cost
+
+        if line_words:
+            block.extend(line_words)
+        if block:
+            flush_block()
 
     return out
 
@@ -264,10 +314,11 @@ def _auto_font_size(
     # 0.94 leaves a small breathing margin so the last word doesn't kiss
     # the edge under variable letterforms.
     by_width = (safe_width * 0.94) / max(1, max_chars_per_line * em)
-    # Visual ceiling: don't make captions look like ransom-note posters.
-    by_height = height_px / 11.0  # ~175px on 1920 tall
-    # Floor: 48px keeps captions legible even on tiny clips.
-    return max(48, int(min(by_width, by_height)))
+    # Visual ceiling: short-form captions sit smaller in the middle third.
+    by_height = height_px / 16.0  # ~120px on 1920 tall
+    cap_px = int(height_px / 13.5)  # hard ceiling ~142px
+    # Floor: 40px keeps captions legible on small outputs.
+    return max(40, int(min(by_width, by_height, cap_px)))
 
 
 def _resolve_colors(
@@ -313,17 +364,18 @@ def build_ass(
     font = _font_family(style)
     font_key = str(style.get("font", "anton"))
     uppercase = bool(style.get("uppercase", True))
-    margin_v = int(height_px * 0.20)  # captions hang ~20% above bottom
-    margin_lr = int(width_px * 0.05)
+    # Bottom-center (alignment 2): sit in the lower letterbox/blur band,
+    # above the TikTok/Reels UI chrome (~bottom 15%).
+    margin_v = int(height_px * 0.22)
+    margin_lr = int(width_px * 0.10)
 
-    # Default max chars: 22 for narrow portrait (most common), 32 for square,
-    # 40 for landscape. Caller can override via style["maxCharsPerLine"].
+    # Default max chars per line: tuned for 2-line short-form blocks.
     if width_px >= height_px:
-        default_max_chars = 38
-    elif width_px == height_px:
         default_max_chars = 32
+    elif width_px == height_px:
+        default_max_chars = 24
     else:
-        default_max_chars = 22
+        default_max_chars = 18
     max_chars_per_line = int(
         style.get("maxCharsPerLine", default_max_chars) or default_max_chars
     )
@@ -352,7 +404,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption, {font}, {base_size}, {accent_ass}, {primary_ass}, {outline_ass}, {back_ass}, -1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 2, {margin_lr}, {margin_lr}, {margin_v}, 1
+Style: Caption, {font}, {base_size}, {accent_ass}, {primary_ass}, {outline_ass}, {back_ass}, -1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 2, 2, {margin_lr}, {margin_lr}, {margin_v}, 1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -375,6 +427,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(events) + "\n"
 
 
+def _words_to_ass_lines(
+    words: list[CaptionWord],
+    *,
+    uppercase: bool,
+    max_chars_per_line: int = 18,
+) -> str:
+    """Join words into 1–2 ASS lines separated by \\N."""
+    lines: list[str] = []
+    current: list[str] = []
+    length = 0
+    for w in words:
+        token = _apply_uppercase(w.text, {"uppercase": uppercase})
+        cost = len(token) + (1 if current else 0)
+        if current and length + cost > max_chars_per_line and len(lines) < _MAX_LINES_PER_CAPTION - 1:
+            lines.append(" ".join(current))
+            current, length = [token], len(token)
+        else:
+            current.append(token)
+            length += cost
+    if current:
+        lines.append(" ".join(current))
+    return "\\N".join(lines[:_MAX_LINES_PER_CAPTION])
+
+
 def _events_for_segment(
     seg: CaptionSegment,
     *,
@@ -387,9 +463,18 @@ def _events_for_segment(
     if not seg.words:
         return []
 
+    outline = f"{{\\3c&H000000&\\bord3\\shad2}}"
+
     if style == "minimal":
-        text = " ".join(_apply_uppercase(w.text, {"uppercase": uppercase}) for w in seg.words)
-        return [_dialogue(seg.start, seg.end, text, leading_tags=f"{{\\c{primary_ass}}}")]
+        text = _words_to_ass_lines(seg.words, uppercase=uppercase)
+        return [
+            _dialogue(
+                seg.start,
+                seg.end,
+                text,
+                leading_tags=f"{{\\c{primary_ass}}}{outline}",
+            )
+        ]
 
     if style == "popup":
         # Emit one Dialogue per word with a small fade-in + scale animation.
@@ -429,23 +514,22 @@ def _events_for_segment(
         )
         return [_dialogue(seg.start, seg.end, text)]
 
-    # Default: highlight — full line in accent, current word swelled in primary.
+    # Default: highlight — show the full phrase; current word in primary.
     events = []
     line_words = [_apply_uppercase(w.text, {"uppercase": uppercase}) for w in seg.words]
     for i, w in enumerate(seg.words):
         before = " ".join(line_words[:i])
         current = line_words[i]
         after = " ".join(line_words[i + 1 :])
-        # Word i is in primary + slightly bigger; siblings in accent.
-        parts: list[str] = []
+        parts: list[str] = [outline]
         if before:
-            parts.append(f"{{\\c{accent_ass}\\bord3\\3c&H000000&}}{before}")
+            parts.append(f"{{\\c{accent_ass}}}{before}")
         parts.append(
-            f"{{\\c{primary_ass}\\fscx115\\fscy115\\bord4\\3c&H000000&}}"
+            f"{{\\c{primary_ass}\\b1}}"
             + ((" " if before else "") + current)
         )
         if after:
-            parts.append(f"{{\\c{accent_ass}\\bord3\\3c&H000000&}} {after}")
+            parts.append(f"{{\\c{accent_ass}}} {after}")
         events.append(_dialogue(w.start, max(w.end, w.start + 0.12), "".join(parts)))
     return events
 

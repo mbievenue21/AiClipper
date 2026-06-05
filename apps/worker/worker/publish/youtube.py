@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,58 @@ log = structlog.get_logger(__name__)
 
 UPLOAD_URL = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status"
 REFRESH_URL = "https://oauth2.googleapis.com/token"
+
+_YT_MAX_TAG_LEN = 30
+_YT_MAX_TAGS_TOTAL = 500
+_YT_MAX_TAG_COUNT = 30
+
+
+def _sanitize_youtube_tags(tags: list[str]) -> list[str]:
+    """YouTube rejects uploads when any tag exceeds 30 chars or total > 500."""
+    seen: set[str] = set()
+    out: list[str] = []
+    total = 0
+    for raw in tags:
+        t = str(raw).strip().lower()
+        t = re.sub(r"^#+", "", t)
+        t = re.sub(r"[^a-z0-9 _-]", "", t).strip()
+        t = re.sub(r"\s+", " ", t)
+        if not t:
+            continue
+        if len(t) > _YT_MAX_TAG_LEN:
+            trimmed = t[:_YT_MAX_TAG_LEN]
+            cut = trimmed.rfind(" ")
+            t = (trimmed[:cut] if cut > 8 else trimmed).strip()
+            if not t:
+                continue
+        if t in seen:
+            continue
+        if total + len(t) > _YT_MAX_TAGS_TOTAL:
+            break
+        seen.add(t)
+        out.append(t)
+        total += len(t)
+        if len(out) >= _YT_MAX_TAG_COUNT:
+            break
+    return out
+
+
+def _format_youtube_error(resp: httpx.Response) -> str:
+    try:
+        data = resp.json()
+        err = data.get("error", {})
+        parts: list[str] = []
+        if err.get("message"):
+            parts.append(str(err["message"]))
+        for item in err.get("errors") or []:
+            reason = item.get("reason") or "error"
+            msg = item.get("message") or ""
+            parts.append(f"{reason}: {msg}".strip(": "))
+        if parts:
+            return "; ".join(parts)
+    except Exception:
+        pass
+    return resp.text[:500]
 
 
 def _category_for_clip() -> str:
@@ -78,11 +131,12 @@ class YouTubeUploader(Uploader):
         if not path.exists():
             raise PublishError(f"Video file missing on disk: {path}")
 
+        safe_tags = _sanitize_youtube_tags(tags)
         metadata = {
             "snippet": {
                 "title": title[:100],  # YT hard limit
                 "description": (description or "")[:5000],
-                "tags": [t for t in tags if t][:50],
+                "tags": safe_tags,
                 "categoryId": _category_for_clip(),
             },
             "status": {
@@ -114,8 +168,9 @@ class YouTubeUploader(Uploader):
             resp = await _do(new_token)
 
         if resp.status_code >= 400:
+            detail = _format_youtube_error(resp)
             raise PublishError(
-                f"YouTube upload failed ({resp.status_code}): {resp.text[:500]}"
+                f"YouTube upload failed ({resp.status_code}): {detail}"
             )
 
         data = resp.json()

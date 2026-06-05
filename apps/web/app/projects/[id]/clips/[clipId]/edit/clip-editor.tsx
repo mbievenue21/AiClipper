@@ -81,6 +81,8 @@ export function ClipEditor({
   sourceDuration,
   highlightStart,
   highlightEnd,
+  sourceStart,
+  sourceEnd,
   storedTrimStart,
   storedTrimEnd,
   storedCaptionSegments,
@@ -95,6 +97,8 @@ export function ClipEditor({
   sourceDuration: number;
   highlightStart: number;
   highlightEnd: number;
+  sourceStart: number | null;
+  sourceEnd: number | null;
   storedTrimStart: number;
   storedTrimEnd: number;
   storedCaptionSegments: CaptionSegmentOverride[] | null;
@@ -122,6 +126,8 @@ export function ClipEditor({
         highlightEnd,
         storedTrimStart,
         storedTrimEnd,
+        sourceStart,
+        sourceEnd,
       ),
     }),
     [
@@ -131,6 +137,8 @@ export function ClipEditor({
       transcriptSegments,
       highlightStart,
       highlightEnd,
+      sourceStart,
+      sourceEnd,
     ],
   );
 
@@ -162,6 +170,9 @@ export function ClipEditor({
             highlightEnd,
             trimStart,
             trimEnd,
+            sourceStart,
+            sourceEnd,
+            true,
           )
         : committed.captionSegments,
     };
@@ -205,6 +216,9 @@ export function ClipEditor({
           highlightEnd,
           trimStart,
           trimEnd,
+          sourceStart,
+          sourceEnd,
+          true,
         ),
       });
     }

@@ -28,6 +28,7 @@ import structlog
 from sqlalchemy import select
 
 from ..config import get_settings
+from ..pipeline_timing import begin_run, update_run
 from ..db import session_scope
 from ..media.ffmpeg_util import extract_mono_wav
 from ..media.paths import project_dir, rel_path
@@ -195,6 +196,12 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
     settings = get_settings()
     log.info("ingest_start", project_id=project_id)
 
+    pipeline_run_id = begin_run(
+        project_id,
+        twelvelabs_enabled=bool(settings.twelvelabs_enabled),
+        is_reanalysis=False,
+    )
+
     with session_scope() as session:
         project = session.get(Project, project_id)
         if project is None:
@@ -260,12 +267,21 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
             session.refresh(video)
             video_id = video.id
 
+        update_run(
+            pipeline_run_id,
+            video_duration_seconds=float(meta.duration_seconds or 0),
+        )
+
         # Chain Step 6: hand off to the transcribe job.
         # We enqueue here (not via depends_on) because ingest is already done;
         # the new job is immediately eligible to be claimed.
         next_job = queue.enqueue(
             "transcribe",
-            {"project_id": project_id, "video_id": video_id},
+            {
+                "project_id": project_id,
+                "video_id": video_id,
+                "pipeline_run_id": pipeline_run_id,
+            },
             project_id=project_id,
         )
 
@@ -285,6 +301,7 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
             "chat_json_path": rel_chat,
             "duration_seconds": meta.duration_seconds,
             "next_job_id": next_job.id,
+            "pipeline_run_id": pipeline_run_id,
         }
 
     except Exception as exc:

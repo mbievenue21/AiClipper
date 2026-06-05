@@ -177,6 +177,8 @@ async def handle_render(job, progress: ProgressReporter) -> dict[str, Any]:
         clip.height_px = probe.height or height
         clip.dominant_color = dominant_hex
         clip.aspect = aspect
+        clip.source_start_seconds = snapped_start
+        clip.source_end_seconds = snapped_end
         clip.status = "ready"
         clip.error_message = None
         clip.updated_at = _now_ms()

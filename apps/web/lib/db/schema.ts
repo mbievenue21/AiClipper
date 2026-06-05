@@ -467,6 +467,10 @@ export const clips = sqliteTable(
     captionStyleJson: text("caption_style_json", {
       mode: "json",
     }).$type<ClipCaptionSettings>(),
+    // Absolute source-video window that matches the rendered clip.mp4 file
+    // (after scene-snap and/or editor trim). Used for caption sync.
+    sourceStartSeconds: real("source_start_seconds"),
+    sourceEndSeconds: real("source_end_seconds"),
     // Clip editor: trim offsets relative to highlight bounds on source video.
     trimStartSeconds: real("trim_start_seconds"),
     trimEndSeconds: real("trim_end_seconds"),
@@ -756,6 +760,107 @@ export const highlightCandidates = sqliteTable(
 );
 
 // ============================================================================
+// PIPELINE ANALYTICS — per-run stage timings for bottleneck analysis
+// ============================================================================
+export type PipelineRunStatus = "running" | "complete" | "failed";
+
+export type PipelineStageStatus =
+  | "ok"
+  | "failed"
+  | "skipped"
+  | "timeout"
+  | "partial";
+
+/** Stable stage keys — keep in sync with worker.pipeline_timing.STAGE_KEYS */
+export type PipelineStageKey =
+  | "ingest"
+  | "transcribe"
+  | "twelvelabs_index"
+  | "twelvelabs_visual"
+  | "pyscene_detect"
+  | "librosa_audio"
+  | "chat_density"
+  | "candidate_generation"
+  | "candidate_fusion"
+  | "gemini_rerank"
+  | "highlights_build"
+  | "highlights_save";
+
+export const PIPELINE_STAGE_DEFS: {
+  key: PipelineStageKey;
+  label: string;
+  group: "core" | "twelvelabs" | "analyze";
+}[] = [
+  { key: "ingest", label: "Ingest", group: "core" },
+  { key: "transcribe", label: "Transcribe", group: "core" },
+  { key: "twelvelabs_index", label: "TL index", group: "twelvelabs" },
+  { key: "twelvelabs_visual", label: "TL visual", group: "twelvelabs" },
+  { key: "pyscene_detect", label: "Scene cuts", group: "analyze" },
+  { key: "librosa_audio", label: "Librosa audio", group: "analyze" },
+  { key: "chat_density", label: "Chat density", group: "analyze" },
+  { key: "candidate_generation", label: "Candidates", group: "analyze" },
+  { key: "candidate_fusion", label: "Fusion", group: "analyze" },
+  { key: "gemini_rerank", label: "Gemini rerank", group: "analyze" },
+  { key: "highlights_build", label: "Build highlights", group: "analyze" },
+  { key: "highlights_save", label: "Save highlights", group: "analyze" },
+];
+
+export const pipelineRuns = sqliteTable(
+  "pipeline_runs",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    status: text("status").$type<PipelineRunStatus>().notNull().default("running"),
+    startedAt: integer("started_at", { mode: "timestamp_ms" })
+      .notNull()
+      .default(sql`(unixepoch() * 1000)`),
+    finishedAt: integer("finished_at", { mode: "timestamp_ms" }),
+    videoDurationSeconds: real("video_duration_seconds"),
+    twelvelabsEnabled: integer("twelvelabs_enabled", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    isReanalysis: integer("is_reanalysis", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    metaJson: text("meta_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+  },
+  (t) => [
+    index("pipeline_runs_project_idx").on(t.projectId),
+    index("pipeline_runs_started_idx").on(t.startedAt),
+  ],
+);
+
+export const pipelineStageTimings = sqliteTable(
+  "pipeline_stage_timings",
+  {
+    id: id(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => pipelineRuns.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    stage: text("stage").$type<PipelineStageKey>().notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    finishedAt: integer("finished_at", { mode: "timestamp_ms" }),
+    status: text("status").$type<PipelineStageStatus>().notNull().default("ok"),
+    jobId: text("job_id"),
+    metaJson: text("meta_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+  },
+  (t) => [
+    index("pipeline_stage_timings_run_idx").on(t.runId),
+    index("pipeline_stage_timings_project_stage_idx").on(t.projectId, t.stage),
+  ],
+);
+
+// ============================================================================
 // Type exports for use throughout the app.
 // ============================================================================
 export type Project = typeof projects.$inferSelect;
@@ -771,3 +876,5 @@ export type NewAccount = typeof accounts.$inferInsert;
 export type ScheduledUpload = typeof scheduledUploads.$inferSelect;
 export type NewScheduledUpload = typeof scheduledUploads.$inferInsert;
 export type TranscriptSegment = typeof transcriptSegments.$inferSelect;
+export type PipelineRun = typeof pipelineRuns.$inferSelect;
+export type PipelineStageTiming = typeof pipelineStageTimings.$inferSelect;

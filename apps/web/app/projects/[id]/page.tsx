@@ -36,6 +36,8 @@ import { HighlightEvidenceDetails } from "./highlight-evidence";
 import { getTwelveLabsConfigStatus } from "@/lib/twelvelabs/status";
 import { ReanalyzeDialog } from "./reanalyze-dialog";
 import { DeleteProjectDialog } from "./delete-project-dialog";
+import { PipelineTimingDialog } from "./pipeline-timing-dialog";
+import { getProjectTimingBreakdown } from "@/lib/pipeline/analytics";
 
 export const dynamic = "force-dynamic";
 
@@ -463,6 +465,9 @@ export default async function ProjectPage({ params }: PageProps) {
     localSignals: highlights.length > 0 || Boolean(transcript),
   };
 
+  const pipelineTiming =
+    project.status === "ready" ? getProjectTimingBreakdown(id) : null;
+
   const defaultDescription = [
     project.name,
     settings.vibe ? `Vibe: ${settings.vibe}` : null,
@@ -500,6 +505,7 @@ export default async function ProjectPage({ params }: PageProps) {
           <Badge variant={statusVariants[project.status] ?? "secondary"}>
             {statusLabel}
           </Badge>
+          <PipelineTimingDialog data={pipelineTiming} />
           <DeleteProjectDialog projectId={id} projectName={project.name} />
         </div>
       </div>
@@ -627,9 +633,9 @@ export default async function ProjectPage({ params }: PageProps) {
                   {reason && (
                     <>
                       <div className="mt-2 flex flex-wrap gap-1.5">
-                        {reason.signals?.map((sig) => (
+                        {reason.signals?.map((sig, i) => (
                           <span
-                            key={sig}
+                            key={`${sig}-${i}`}
                             className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
                           >
                             {sig.replace(/_/g, " ")}

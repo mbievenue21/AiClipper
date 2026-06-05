@@ -80,18 +80,20 @@ def _build_cmd(spec: RenderSpec) -> list[str]:
         if spec.audio_loudnorm
         else "anull"
     )
+    # Fast keyframe seek + short fine seek keeps long-VOD cuts quick while
+    # aligning A/V with transcript timestamps (input-only -ss drifts captions).
+    start = max(0.0, spec.start_seconds)
+    pre_seek = max(0.0, start - 3.0)
+    fine_seek = start - pre_seek
     return [
         "ffmpeg",
         "-y",
-        # Seeking BEFORE -i is fast (input seek); placing it after -i is
-        # frame-accurate but slow. For clip cuts we use both: input seek to
-        # the nearest keyframe, then -ss again with -accurate_seek on output
-        # for frame precision. ffmpeg's modern `-ss <input> -t <dur>` is fine
-        # when paired with re-encoding (which we do for the blur filter).
         "-ss",
-        f"{max(0.0, spec.start_seconds):.3f}",
+        f"{pre_seek:.3f}",
         "-i",
         str(spec.source_path),
+        "-ss",
+        f"{fine_seek:.3f}",
         "-t",
         f"{spec.duration:.3f}",
         "-filter_complex",

@@ -156,6 +156,8 @@ async def handle_reedit(job, progress: ProgressReporter) -> dict[str, Any]:
         clip.dominant_color = dominant_hex
         clip.trim_start_seconds = trim_start
         clip.trim_end_seconds = trim_end
+        clip.source_start_seconds = cut_start
+        clip.source_end_seconds = cut_end
         clip.caption_segments_json = json.dumps(caption_segments)
         clip.caption_style = parent_style
         clip.status = "ready"

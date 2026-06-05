@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -108,14 +109,22 @@ class AnalysisOutput:
     used_llm: bool
     scene_cuts: list[float] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    stage_timings_ms: dict[str, int] = field(default_factory=dict)
+
+
+def _tick() -> float:
+    return time.perf_counter()
 
 
 def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisOutput:
     notes: list[str] = []
     scene_cuts = list(inputs.scene_cuts or [])
+    timings: dict[str, int] = {}
 
     progress(0.05, "computing audio features (librosa)")
+    t0 = _tick()
     audio_series = compute_audio_features(inputs.audio_path)
+    timings["librosa_audio"] = int((_tick() - t0) * 1000)
 
     if is_enrichment_configured():
         progress(0.15, "running audio enrichment pass")
@@ -126,13 +135,16 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
             )
 
     progress(0.50, "computing chat density")
+    t0 = _tick()
     chat_density = compute_chat_density(
         inputs.chat_events, duration_seconds=inputs.duration_seconds or audio_series.duration_seconds
     )
+    timings["chat_density"] = int((_tick() - t0) * 1000)
     if not inputs.chat_events:
         notes.append("No chat track available — chat score will be zero.")
 
     progress(0.65, "generating candidate windows")
+    t0 = _tick()
     local_candidates = generate_candidates(
         inputs.segments,
         audio=audio_series,
@@ -141,8 +153,10 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         max_seconds=inputs.max_clip_seconds,
         target_count=inputs.top_n,
     )
+    timings["candidate_generation"] = int((_tick() - t0) * 1000)
 
     visual_segments = list(inputs.visual_segments or [])
+    t0 = _tick()
     if visual_segments:
         progress(0.72, "fusing local + TwelveLabs visual candidates")
         fused = fuse_highlight_candidates(
@@ -163,6 +177,7 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         candidates = local_candidates
         if inputs.twelvelabs_used:
             notes.append("TwelveLabs enabled but no visual segments available — local only.")
+    timings["candidate_fusion"] = int((_tick() - t0) * 1000)
 
     log.info(
         "candidates_generated",
@@ -188,12 +203,14 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
             used_llm=False,
             scene_cuts=scene_cuts,
             notes=notes,
+            stage_timings_ms=timings,
         )
 
     progress(0.80, f"asking {inputs.analyze_model} to pick the best clips")
     llm_picks: list[LlmPick] | None = None
     max_pre_roll = max(inputs.pre_roll_seconds, 4.0) + 4.0
 
+    t0 = _tick()
     if gemini_configured():
         llm_picks = rerank_with_gemini(
             candidates,
@@ -222,8 +239,10 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
             notes.append("Multimodal boundary refinement applied.")
     else:
         notes.append("GEMINI_API_KEY not set; using local score only.")
+    timings["gemini_rerank"] = int((_tick() - t0) * 1000)
 
     used_llm = bool(llm_picks)
+    t0 = _tick()
     highlights = _build_highlights(
         candidates,
         llm_picks=llm_picks,
@@ -234,6 +253,7 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         tail_padding_seconds=inputs.tail_padding_seconds,
         max_clip_seconds=inputs.max_clip_seconds,
     )
+    timings["highlights_build"] = int((_tick() - t0) * 1000)
 
     progress(0.95, "finalising highlights")
     return AnalysisOutput(
@@ -244,6 +264,7 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         used_llm=used_llm,
         scene_cuts=scene_cuts,
         notes=notes,
+        stage_timings_ms=timings,
     )
 
 

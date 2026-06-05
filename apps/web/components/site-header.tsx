@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { HardDrive, Scissors, Wrench } from "lucide-react";
+import { BarChart3, HardDrive, Scissors, Wrench } from "lucide-react";
 
 export function SiteHeader() {
   return (
@@ -15,6 +15,13 @@ export function SiteHeader() {
             className="rounded-md px-3 py-1.5 hover:bg-accent hover:text-foreground"
           >
             Projects
+          </Link>
+          <Link
+            href="/analytics"
+            className="flex items-center gap-1.5 rounded-md px-3 py-1.5 hover:bg-accent hover:text-foreground"
+          >
+            <BarChart3 className="size-3.5" />
+            Analytics
           </Link>
           <Link
             href="/accounts"

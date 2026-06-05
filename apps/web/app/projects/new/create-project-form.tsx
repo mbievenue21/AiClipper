@@ -142,17 +142,80 @@ export function CreateProjectForm() {
 
               <div className="space-y-2">
                 <label htmlFor="vibe" className="text-sm font-medium">
-                  Vibe hint{" "}
+                  What to look for{" "}
                   <span className="font-normal text-muted-foreground">(optional)</span>
                 </label>
                 <Input
                   id="vibe"
                   name="vibe"
-                  placeholder="e.g. funny reactions, key insights, dramatic moments"
+                  placeholder="e.g. funny hype reactions from Tarik, insane Valorant clutches"
                   disabled={pending}
                 />
                 <p className="text-xs text-muted-foreground">
-                  Free-text steer for Gemini when it ranks candidates.
+                  Creator brief for Gemini — names, vibes, game moments. You can
+                  change this later via Re-analyze.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-2">
+                  <label htmlFor="preRollSeconds" className="text-sm font-medium">
+                    Buildup pre-roll (s)
+                  </label>
+                  <Input
+                    id="preRollSeconds"
+                    name="preRollSeconds"
+                    type="number"
+                    min={0}
+                    max={20}
+                    defaultValue={DEFAULT_PROJECT_SETTINGS.preRollSeconds}
+                    disabled={pending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Seconds of context before the climax. 5–15s helps game
+                    clips & punchlines land. 0 disables.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="tailPaddingSeconds" className="text-sm font-medium">
+                    Reaction tail (s)
+                  </label>
+                  <Input
+                    id="tailPaddingSeconds"
+                    name="tailPaddingSeconds"
+                    type="number"
+                    min={0}
+                    max={10}
+                    defaultValue={DEFAULT_PROJECT_SETTINGS.tailPaddingSeconds}
+                    disabled={pending}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Seconds after the climax for the reaction.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label htmlFor="analyzeModel" className="text-sm font-medium">
+                  Analysis model
+                </label>
+                <select
+                  id="analyzeModel"
+                  name="analyzeModel"
+                  defaultValue={DEFAULT_PROJECT_SETTINGS.analyzeModel}
+                  disabled={pending}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <option value="gemini-2.5-pro">
+                    gemini-2.5-pro — better narrative reasoning, ~$0.04/video
+                  </option>
+                  <option value="gemini-2.5-flash">
+                    gemini-2.5-flash — free tier, faster but blunter
+                  </option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Pro can shift clip start/end to capture buildup &
+                  reaction. Flash uses the candidates as-is.
                 </p>
               </div>
             </div>

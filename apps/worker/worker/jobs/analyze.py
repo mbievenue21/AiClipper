@@ -150,6 +150,37 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
     if not audio_abs.exists():
         raise FileNotFoundError(f"audio file missing: {audio_abs}")
 
+    # Per-run model override: when the user triggers "Re-analyze" from the
+    # project page they can pick Flash vs Pro for that specific run without
+    # touching the saved project settings. The web layer puts the choice in
+    # the job payload under `analyze_model_override`.
+    analyze_model_override = payload.get("analyze_model_override")
+    if analyze_model_override and analyze_model_override in (
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+    ):
+        chosen_model = str(analyze_model_override)
+        log.info(
+            "analyze_model_overridden",
+            project_id=project_id,
+            override=chosen_model,
+            saved=settings.get("analyzeModel"),
+        )
+    else:
+        chosen_model = str(settings.get("analyzeModel", "gemini-2.5-pro"))
+
+    # Per-run vibe / creator brief override (re-analyze dialog).
+    vibe_override = payload.get("vibe_override")
+    if vibe_override is not None:
+        chosen_vibe = str(vibe_override).strip()
+        log.info(
+            "analyze_vibe_overridden",
+            project_id=project_id,
+            override_len=len(chosen_vibe),
+        )
+    else:
+        chosen_vibe = str(settings.get("vibe", "") or "")
+
     analysis_input = AnalysisInput(
         audio_path=audio_abs,
         duration_seconds=duration,
@@ -159,7 +190,10 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         top_n=int(settings.get("topN", 3)),
         min_clip_seconds=float(settings.get("minClipSeconds", 20)),
         max_clip_seconds=float(settings.get("maxClipSeconds", 60)),
-        vibe=str(settings.get("vibe", "") or ""),
+        vibe=chosen_vibe,
+        pre_roll_seconds=float(settings.get("preRollSeconds", 8)),
+        tail_padding_seconds=float(settings.get("tailPaddingSeconds", 2)),
+        analyze_model=chosen_model,
     )
 
     try:

@@ -23,6 +23,16 @@ function parseSettings(formData: FormData): ProjectSettings {
     ),
     aspect: String(formData.get("aspect") ?? DEFAULT_PROJECT_SETTINGS.aspect),
     vibe: String(formData.get("vibe") ?? "").trim(),
+    preRollSeconds: Number(
+      formData.get("preRollSeconds") ?? DEFAULT_PROJECT_SETTINGS.preRollSeconds,
+    ),
+    tailPaddingSeconds: Number(
+      formData.get("tailPaddingSeconds") ??
+        DEFAULT_PROJECT_SETTINGS.tailPaddingSeconds,
+    ),
+    analyzeModel: String(
+      formData.get("analyzeModel") ?? DEFAULT_PROJECT_SETTINGS.analyzeModel,
+    ),
   };
 
   const topN = Math.max(1, Math.min(20, Math.floor(raw.topN || 3)));
@@ -36,12 +46,31 @@ function parseSettings(formData: FormData): ProjectSettings {
     ? (raw.aspect as ProjectSettings["aspect"])
     : DEFAULT_PROJECT_SETTINGS.aspect;
 
+  // Pre-roll capped at 20s; tail at 10s. Defaults match the schema.
+  const preRollSeconds = Math.max(
+    0,
+    Math.min(20, Math.floor(raw.preRollSeconds || 0)),
+  );
+  const tailPaddingSeconds = Math.max(
+    0,
+    Math.min(10, Math.floor(raw.tailPaddingSeconds || 0)),
+  );
+
+  const analyzeModel: ProjectSettings["analyzeModel"] = (
+    ["gemini-2.5-pro", "gemini-2.5-flash"] as const
+  ).includes(raw.analyzeModel as ProjectSettings["analyzeModel"])
+    ? (raw.analyzeModel as ProjectSettings["analyzeModel"])
+    : DEFAULT_PROJECT_SETTINGS.analyzeModel;
+
   return {
     topN,
     minClipSeconds: minClip,
     maxClipSeconds: maxClip,
     aspect,
     vibe: raw.vibe.slice(0, 200),
+    preRollSeconds,
+    tailPaddingSeconds,
+    analyzeModel,
   };
 }
 

@@ -114,11 +114,24 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
 
     # Phase 2: chunk transcript into caption segments scoped to the clip.
     progress(0.30, "chunking transcript into caption lines")
+    # Pick max-chars to match the aspect ratio. Portrait is the tight one —
+    # use 22 by default so wide display fonts (Anton/Bebas) stay inside the
+    # 90% safe area at the auto-computed font size. Square / landscape get
+    # roomier counts.
+    if width_px < height_px:
+        chars_per_line = 22
+    elif width_px == height_px:
+        chars_per_line = 32
+    else:
+        chars_per_line = 38
+    # Propagate to build_ass so font-size auto-sizing uses the same number.
+    merged_style = {**merged_style, "maxCharsPerLine": chars_per_line}
+
     segments = chunk_segments(
         raw_segments,
         clip_start=h_start,
         clip_end=h_end,
-        max_chars_per_line=24 if width_px < height_px else 36,
+        max_chars_per_line=chars_per_line,
     )
 
     if not segments:

@@ -1,16 +1,18 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 
 import { db, schema } from "@/lib/db/client";
 import {
   DEFAULT_CAPTION_SETTINGS,
+  DEFAULT_PROJECT_SETTINGS,
   type CaptionFont,
   type CaptionStyle,
   type ClipCaptionSettings,
   type GeneratedUploadMetadata,
+  type ProjectSettings,
 } from "@/lib/db/schema";
 import { enqueueJob } from "@/lib/worker";
 import { generateMetadata, MetadataGenerationError } from "@/lib/ai/metadata";
@@ -20,6 +22,7 @@ import {
   type TrendingTag,
 } from "@/lib/youtube/trending";
 import { hasYouTubeAccount, YouTubeClientError } from "@/lib/youtube/client";
+import { parseTranscript, TranscriptParseError } from "@/lib/transcripts/parse";
 
 const captionStyleSchema = z.object({
   font: z
@@ -288,6 +291,207 @@ export async function scheduleUploadAction(
   };
 }
 
+// -------------------------------------------------------------------------
+// Re-analyze with an optional per-run model override.
+// -------------------------------------------------------------------------
+
+export type ReanalyzeResult =
+  | { ok: true; message: string; jobId: string; modelUsed: string }
+  | { ok: false; message: string };
+
+const reanalyzeSchema = z.object({
+  projectId: z.string().min(1),
+  // Empty string / null = "use whatever's saved on the project"; the worker
+  // will fall back to the project's `analyzeModel` setting.
+  modelOverride: z
+    .union([z.literal("gemini-2.5-pro"), z.literal("gemini-2.5-flash"), z.literal("")])
+    .optional(),
+  /** Per-run creator brief passed to Gemini (maps to project `vibe`). */
+  vibeOverride: z.string().max(500).optional(),
+  /** Also persist the override to the project's saved settings. */
+  persistAsDefault: z.boolean().optional(),
+  persistVibeAsDefault: z.boolean().optional(),
+});
+
+/**
+ * Manually trigger a fresh analyze run on the project's existing transcript.
+ * Useful for A/B testing Pro vs Flash on the same content without paying for
+ * a re-transcription.
+ *
+ * The flow:
+ *   1. Validate that the project has a transcript (analyze depends on it).
+ *   2. Optionally update the saved `analyzeModel` setting (persistAsDefault).
+ *   3. Delete the project's existing highlights so the new run starts clean.
+ *      (Clips already rendered from old highlights stay — only the highlight
+ *      rows are dropped. The cascading FK on highlight_id is SET NULL? No,
+ *      it's CASCADE, so clips DO get deleted. We protect them by setting
+ *      highlight_id NULL is not allowed, so we hard-skip clip deletion by
+ *      only deleting highlights that have no clip rows attached.)
+ *   4. Flip project.status to "analyzing" and enqueue an `analyze` job with
+ *      `analyze_model_override` in the payload.
+ */
+export async function reanalyzeProjectAction(input: {
+  projectId: string;
+  modelOverride?: "gemini-2.5-pro" | "gemini-2.5-flash" | "";
+  vibeOverride?: string;
+  persistAsDefault?: boolean;
+  persistVibeAsDefault?: boolean;
+}): Promise<ReanalyzeResult> {
+  const parsed = reanalyzeSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, message: "Bad request shape." };
+  }
+  const {
+    projectId,
+    modelOverride,
+    vibeOverride,
+    persistAsDefault,
+    persistVibeAsDefault,
+  } = parsed.data;
+
+  const project = db
+    .select()
+    .from(schema.projects)
+    .where(eq(schema.projects.id, projectId))
+    .limit(1)
+    .all()[0];
+  if (!project) {
+    return { ok: false, message: "Project not found." };
+  }
+
+  const video = db
+    .select()
+    .from(schema.videos)
+    .where(eq(schema.videos.projectId, projectId))
+    .limit(1)
+    .all()[0];
+  if (!video) {
+    return {
+      ok: false,
+      message: "Project has no video yet. Run ingest first.",
+    };
+  }
+
+  const transcript = db
+    .select({ id: schema.transcripts.id })
+    .from(schema.transcripts)
+    .where(eq(schema.transcripts.videoId, video.id))
+    .limit(1)
+    .all()[0];
+  if (!transcript) {
+    return {
+      ok: false,
+      message:
+        "Project has no transcript yet. Wait for the transcribe step (or upload your own).",
+    };
+  }
+
+  // Optionally make the override stick for future analyze runs too.
+  // Merge with DEFAULT_PROJECT_SETTINGS so older project rows (which may
+  // not have the new analyzeModel / preRollSeconds fields) still satisfy
+  // the ProjectSettings type when we write them back.
+  const currentSettings: ProjectSettings = {
+    ...DEFAULT_PROJECT_SETTINGS,
+    ...((project.settingsJson as Partial<ProjectSettings>) ?? {}),
+  };
+  const savedModel: ProjectSettings["analyzeModel"] =
+    currentSettings.analyzeModel || "gemini-2.5-pro";
+  const savedVibe = currentSettings.vibe || "";
+  const effectiveModel: string =
+    modelOverride && modelOverride.length > 0 ? modelOverride : savedModel;
+  const trimmedVibe = vibeOverride?.trim() ?? "";
+  const effectiveVibe =
+    trimmedVibe.length > 0 ? trimmedVibe : savedVibe;
+
+  const shouldPersistModel =
+    persistAsDefault && modelOverride && modelOverride.length > 0;
+  const shouldPersistVibe =
+    persistVibeAsDefault && trimmedVibe.length > 0;
+
+  if (shouldPersistModel || shouldPersistVibe) {
+    const next: ProjectSettings = {
+      ...currentSettings,
+      ...(shouldPersistModel ? { analyzeModel: modelOverride } : {}),
+      ...(shouldPersistVibe ? { vibe: trimmedVibe } : {}),
+    };
+    db.update(schema.projects)
+      .set({
+        settingsJson: next,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.projects.id, projectId))
+      .run();
+  }
+
+  // Drop the project's existing highlights so the new run gets a clean slate.
+  // BUT: highlights have a CASCADE FK from clips → deleting a highlight wipes
+  // its clip. We protect any highlight that's already been rendered to a clip
+  // (the user may have published it). Only highlights with no clip rows are
+  // dropped here.
+  const allHighlights = db
+    .select({ id: schema.highlights.id })
+    .from(schema.highlights)
+    .where(eq(schema.highlights.videoId, video.id))
+    .all();
+
+  if (allHighlights.length > 0) {
+    const idList = allHighlights.map((h) => h.id);
+    const clippedHighlightIds = new Set(
+      db
+        .selectDistinct({ highlightId: schema.clips.highlightId })
+        .from(schema.clips)
+        .where(inArray(schema.clips.highlightId, idList))
+        .all()
+        .map((r) => r.highlightId),
+    );
+    for (const h of allHighlights) {
+      if (!clippedHighlightIds.has(h.id)) {
+        db.delete(schema.highlights)
+          .where(eq(schema.highlights.id, h.id))
+          .run();
+      }
+    }
+  }
+
+  // Flip the project status so the UI shows the spinner straight away.
+  db.update(schema.projects)
+    .set({
+      status: "analyzing",
+      notes: [
+        `Re-analyzing with ${effectiveModel}`,
+        effectiveVibe ? `brief: "${effectiveVibe.slice(0, 80)}${effectiveVibe.length > 80 ? "…" : ""}"` : null,
+        shouldPersistModel || shouldPersistVibe ? "(saved as default)" : "(one-off)",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.projects.id, projectId))
+    .run();
+
+  const job = await enqueueJob({
+    type: "analyze",
+    project_id: projectId,
+    payload: {
+      project_id: projectId,
+      video_id: video.id,
+      // The worker reads this and uses it INSTEAD of settings.analyzeModel
+      // for this single run. Persistence is handled above.
+      analyze_model_override:
+        modelOverride && modelOverride.length > 0 ? modelOverride : undefined,
+      vibe_override: trimmedVibe.length > 0 ? trimmedVibe : undefined,
+    },
+  });
+
+  revalidatePath(`/projects/${projectId}`);
+  return {
+    ok: true,
+    message: `Analyzing with ${effectiveModel}${effectiveVibe ? ` — looking for: "${effectiveVibe.slice(0, 60)}${effectiveVibe.length > 60 ? "…" : ""}"` : ""}. Usually 5–30 seconds.`,
+    jobId: job.id,
+    modelUsed: effectiveModel,
+  };
+}
+
 export async function cancelScheduledUploadAction(formData: FormData) {
   const uploadId = String(formData.get("uploadId") || "");
   const projectId = String(formData.get("projectId") || "");
@@ -345,6 +549,170 @@ export async function generateMetadataAction(input: {
 // -------------------------------------------------------------------------
 // Trending tag suggestions via YouTube Data API.
 // -------------------------------------------------------------------------
+
+// -------------------------------------------------------------------------
+// Custom transcript upload (SRT / VTT / JSON).
+// -------------------------------------------------------------------------
+
+export type UploadTranscriptResult =
+  | {
+      ok: true;
+      message: string;
+      segmentCount: number;
+      format: string;
+    }
+  | { ok: false; message: string };
+
+/**
+ * Replace the auto-generated transcript for a project with a user-supplied
+ * one (SRT, VTT, or JSON). The existing transcript + transcript_segments
+ * rows are deleted (cascade-safe) and replaced. Any previously generated
+ * highlights are also cleared so the next analyze run starts fresh.
+ *
+ * Limits: 5 MB file size, 100k segments — both well above any sane VTT.
+ */
+const MAX_TRANSCRIPT_BYTES = 5 * 1024 * 1024;
+const MAX_TRANSCRIPT_SEGMENTS = 100_000;
+
+export async function uploadTranscriptAction(input: {
+  projectId: string;
+  filename: string;
+  content: string;
+  rerunAnalyze: boolean;
+}): Promise<UploadTranscriptResult> {
+  const { projectId, filename, content, rerunAnalyze } = input;
+  if (!projectId || !content) {
+    return { ok: false, message: "Missing projectId or content." };
+  }
+  if (content.length > MAX_TRANSCRIPT_BYTES) {
+    return {
+      ok: false,
+      message: `Transcript file is over the ${MAX_TRANSCRIPT_BYTES / 1024 / 1024} MB limit.`,
+    };
+  }
+
+  // Look up the project + video so we know what to attach the transcript to.
+  const project = db
+    .select()
+    .from(schema.projects)
+    .where(eq(schema.projects.id, projectId))
+    .limit(1)
+    .all()[0];
+  if (!project) return { ok: false, message: "Project not found." };
+
+  const video = db
+    .select()
+    .from(schema.videos)
+    .where(eq(schema.videos.projectId, projectId))
+    .limit(1)
+    .all()[0];
+  if (!video) {
+    return {
+      ok: false,
+      message:
+        "This project has no video yet. Run ingest first, then upload a transcript.",
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = parseTranscript(filename, content);
+  } catch (err) {
+    const msg =
+      err instanceof TranscriptParseError
+        ? err.message
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    return { ok: false, message: msg };
+  }
+  if (parsed.segments.length > MAX_TRANSCRIPT_SEGMENTS) {
+    return {
+      ok: false,
+      message: `Transcript has ${parsed.segments.length} segments (max ${MAX_TRANSCRIPT_SEGMENTS}).`,
+    };
+  }
+
+  // Delete prior transcript (CASCADE drops segments) AND any highlights
+  // that were built off the old transcript — they'd reference text that no
+  // longer exists.
+  db.delete(schema.transcripts)
+    .where(eq(schema.transcripts.videoId, video.id))
+    .run();
+  db.delete(schema.highlights)
+    .where(eq(schema.highlights.videoId, video.id))
+    .run();
+
+  // Insert the new transcript + its segments in a single transaction.
+  const fullText = parsed.segments
+    .map((s) => s.text.trim())
+    .filter(Boolean)
+    .join(" ");
+
+  const transcriptId = db
+    .insert(schema.transcripts)
+    .values({
+      videoId: video.id,
+      language: parsed.language,
+      model: `user-upload:${parsed.format}`,
+      fullText,
+    })
+    .returning({ id: schema.transcripts.id })
+    .all()[0].id;
+
+  // Batch insert segments. SQLite has a 999 parameter limit by default; we
+  // insert in chunks of 200 segments (≤4 columns each) to stay well under.
+  const CHUNK = 200;
+  for (let i = 0; i < parsed.segments.length; i += CHUNK) {
+    const slice = parsed.segments.slice(i, i + CHUNK);
+    db.insert(schema.transcriptSegments)
+      .values(
+        slice.map((s) => ({
+          transcriptId,
+          startSeconds: s.startSeconds,
+          endSeconds: s.endSeconds,
+          text: s.text,
+          wordsJson: s.words
+            ? s.words.map((w) => ({
+                word: w.word,
+                start: w.start,
+                end: w.end,
+                confidence: 1.0,
+              }))
+            : null,
+        })),
+      )
+      .run();
+  }
+
+  // Reset project state so the user sees the new transcript reflected.
+  db.update(schema.projects)
+    .set({
+      status: rerunAnalyze ? "analyzing" : "ready",
+      notes: `Transcript replaced with user ${parsed.format.toUpperCase()} (${parsed.segments.length} segments).`,
+      updatedAt: new Date(),
+    })
+    .where(eq(schema.projects.id, projectId))
+    .run();
+
+  if (rerunAnalyze) {
+    await enqueueJob({
+      type: "analyze",
+      project_id: projectId,
+      payload: { project_id: projectId, video_id: video.id },
+    });
+  }
+
+  revalidatePath(`/projects/${projectId}`);
+  return {
+    ok: true,
+    message: rerunAnalyze
+      ? `Replaced transcript (${parsed.segments.length} segments) and queued re-analysis.`
+      : `Replaced transcript (${parsed.segments.length} segments).`,
+    segmentCount: parsed.segments.length,
+    format: parsed.format,
+  };
+}
 
 export type TrendingTagsResult =
   | {

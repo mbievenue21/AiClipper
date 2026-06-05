@@ -50,12 +50,35 @@ const updatedAt = () =>
 // created (number of clips, length range, aspect ratio, vibe hint). Every
 // downstream stage (analyze, render, publish) reads from this one place.
 // ============================================================================
+export type AnalyzeModel = "gemini-2.5-pro" | "gemini-2.5-flash";
+
 export type ProjectSettings = {
   topN: number; // 1..20 — how many highlights to keep
   minClipSeconds: number; // default 20
   maxClipSeconds: number; // default 60
   aspect: "9:16" | "16:9" | "1:1"; // default "9:16"
   vibe: string; // free-text hint passed to Gemini (e.g. "funny moments")
+
+  /**
+   * Seconds of context the renderer pulls in BEFORE the LLM-picked start.
+   * The motivation is gaming highlights (Valorant clutches, speedruns, etc.)
+   * where the climax has a 5–15s buildup that makes the moment land. The
+   * renderer snaps the padded start back to the nearest sentence boundary
+   * inside ±2s so we don't start mid-word.
+   * 0 = disabled. Bounded at 30s.
+   */
+  preRollSeconds: number; // default 8
+
+  /** Seconds added after the LLM end-time (for reaction shots). 0 = disabled. */
+  tailPaddingSeconds: number; // default 2
+
+  /**
+   * Which Gemini model to use for highlight rerank.
+   * - "gemini-2.5-pro" (default): ~$0.03–0.05 per analysis but much better
+   *   at narrative-arc reasoning; can adjust start/end to capture buildup.
+   * - "gemini-2.5-flash": free tier; faster but blunter judgement.
+   */
+  analyzeModel: AnalyzeModel; // default "gemini-2.5-pro"
 };
 
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
@@ -64,6 +87,9 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   maxClipSeconds: 60,
   aspect: "9:16",
   vibe: "",
+  preRollSeconds: 8,
+  tailPaddingSeconds: 2,
+  analyzeModel: "gemini-2.5-pro",
 };
 
 export const projects = sqliteTable("projects", {

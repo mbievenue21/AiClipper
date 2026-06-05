@@ -13,7 +13,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
 import { db, schema } from "@/lib/db/client";
 import {
   DEFAULT_CAPTION_SETTINGS,
@@ -27,7 +26,10 @@ import {
 import { ClipCard, type ClipCardData } from "./clip-card";
 import { RenderHighlightButton } from "./highlight-actions";
 import { ProjectLiveProgress } from "./project-live-progress";
+import { ProjectPipelinePanel } from "./project-pipeline-panel";
 import type { AccountOption } from "./schedule-upload-dialog";
+import { TranscriptUploadDialog } from "./transcript-upload-dialog";
+import { ReanalyzeDialog } from "./reanalyze-dialog";
 
 export const dynamic = "force-dynamic";
 
@@ -41,15 +43,6 @@ const statusVariants: Record<
   analyzing: "secondary",
   ready: "default",
   failed: "destructive",
-};
-
-const JOB_LABELS: Record<string, string> = {
-  ingest: "Ingest",
-  transcribe: "Transcribe",
-  analyze: "Analyze",
-  render: "Render",
-  caption: "Captions",
-  publish: "Publish",
 };
 
 function formatBytes(n: number | null | undefined): string {
@@ -230,9 +223,6 @@ export default async function ProjectPage({ params }: PageProps) {
     };
   });
 
-  const latestByType = new Map<string, (typeof jobs)[number]>();
-  for (const j of jobs) if (!latestByType.has(j.type)) latestByType.set(j.type, j);
-
   const anyJobActive = jobs.some(
     (j) => j.status === "pending" || j.status === "running",
   );
@@ -260,6 +250,49 @@ export default async function ProjectPage({ params }: PageProps) {
     }));
 
   const renderedHighlightIds = new Set(clips.map((c) => c.highlightId));
+
+  const activePipelineJobs = jobs
+    .filter((j) => j.status === "pending" || j.status === "running")
+    .map((j) => {
+      let clipLabel: string | undefined;
+      if (j.type === "render" || j.type === "caption") {
+        const payload = j.payloadJson as {
+          clip_id?: string;
+          highlight_id?: string;
+        };
+        let clipId = payload?.clip_id;
+        if (!clipId && payload?.highlight_id) {
+          clipId = clips.find((c) => c.highlightId === payload.highlight_id)?.id;
+        }
+        if (clipId) {
+          const clip = clips.find((c) => c.id === clipId);
+          const highlight = clip
+            ? highlights.find((h) => h.id === clip.highlightId)
+            : undefined;
+          clipLabel =
+            highlight?.title ||
+            (highlight
+              ? `Highlight @ ${formatTimecode(highlight.startSeconds)}`
+              : undefined);
+        }
+      }
+      return {
+        id: j.id,
+        type: j.type,
+        status: j.status,
+        progress: j.progress,
+        progressMessage: j.progressMessage,
+        errorMessage: j.errorMessage,
+        clipLabel,
+      };
+    });
+
+  const showPipelinePanel =
+    pipelineActive ||
+    activePipelineJobs.length > 0 ||
+    highlights.length > 0 ||
+    clipCards.length > 0;
+
   const defaultDescription = [
     project.name,
     settings.vibe ? `Vibe: ${settings.vibe}` : null,
@@ -298,125 +331,43 @@ export default async function ProjectPage({ params }: PageProps) {
         </Badge>
       </div>
 
-      {Array.from(latestByType.values())
-        .filter((j) => j.type !== "render" && j.type !== "caption" && j.type !== "publish")
-        .map((j) => (
-          <Card key={j.id} className="mb-4">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base">
-                {JOB_LABELS[j.type] ?? j.type} job
-              </CardTitle>
-              <CardDescription>
-                {j.status}
-                {j.progressMessage ? ` — ${j.progressMessage}` : null}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <Progress value={Math.round(j.progress * 100)} />
-              <p className="text-xs text-muted-foreground">
-                {Math.round(j.progress * 100)}% · job {j.id}
-              </p>
-              {j.errorMessage && (
-                <pre className="max-h-40 overflow-auto rounded-md bg-muted p-2 text-xs whitespace-pre-wrap">
-                  {j.errorMessage}
-                </pre>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-
-      {video ? (
-        <Card className="mb-4">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <FileVideo className="size-4" />
-              Source video
-            </CardTitle>
-            <CardDescription>
-              Stored under{" "}
-              <code className="text-xs">data/videos/{video.filePath}</code>
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
-            <div>
-              <span className="text-muted-foreground">Duration</span>
-              <p>{formatDuration(video.durationSeconds)}</p>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Size</span>
-              <p>{formatBytes(video.sizeBytes)}</p>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Resolution</span>
-              <p>
-                {video.width && video.height
-                  ? `${video.width}×${video.height}`
-                  : "—"}
-              </p>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Codec / FPS</span>
-              <p>
-                {[video.codec, video.fps ? `${video.fps.toFixed(2)} fps` : null]
-                  .filter(Boolean)
-                  .join(" · ") || "—"}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      ) : (
-        !pipelineActive && (
-          <Card className="border-dashed mb-4">
-            <CardContent className="py-8 text-center text-sm text-muted-foreground">
-              No video file yet.
-            </CardContent>
-          </Card>
-        )
-      )}
-
-      {transcript && (
-        <Card className="mb-4">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <FileText className="size-4" />
-              Transcript
-            </CardTitle>
-            <CardDescription>
-              {[
-                transcript.language?.toUpperCase(),
-                `${transcript.segmentCount} segments`,
-                transcript.model,
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {transcript.fullText ? (
-              <div className="max-h-48 overflow-auto rounded-md bg-muted p-3 text-sm whitespace-pre-wrap leading-relaxed">
-                {transcript.fullText.length > 1200
-                  ? transcript.fullText.slice(0, 1200) + "…"
-                  : transcript.fullText}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">No text extracted.</p>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      <ProjectPipelinePanel
+        projectStatus={project.status}
+        hasVideo={Boolean(video)}
+        hasTranscript={Boolean(transcript)}
+        highlightCount={highlights.length}
+        clipCount={clipCards.length}
+        activeJobs={activePipelineJobs}
+        show={showPipelinePanel}
+      />
 
       {highlights.length > 0 && (
-        <Card className="mb-4">
+        <Card className="mb-4 scroll-mt-28">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="size-4" />
-              Highlight candidates
-            </CardTitle>
-            <CardDescription>
-              {highlights.length} clip{highlights.length === 1 ? "" : "s"} picked.
-              Click <strong>Render</strong> on any of them to cut the final
-              vertical video and (optionally) burn in captions.
-            </CardDescription>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Sparkles className="size-4" />
+                  Highlight candidates
+                </CardTitle>
+                <CardDescription>
+                  {highlights.length} clip{highlights.length === 1 ? "" : "s"} picked.
+                  Click <strong>Render</strong> on any of them to cut the final
+                  vertical video and (optionally) burn in captions.
+                </CardDescription>
+              </div>
+              <ReanalyzeDialog
+                projectId={id}
+                savedModel={settings.analyzeModel}
+                savedVibe={settings.vibe}
+                disabled={!transcript || pipelineActive}
+                disabledReason={
+                  !transcript
+                    ? "Wait for the transcribe step to finish (or upload your own transcript)."
+                    : "Another pipeline step is already running. Try again when it finishes."
+                }
+              />
+            </div>
           </CardHeader>
           <CardContent className="space-y-3">
             {highlights.map((h, idx) => {
@@ -495,7 +446,7 @@ export default async function ProjectPage({ params }: PageProps) {
       )}
 
       {clipCards.length > 0 && (
-        <Card className="mb-4">
+        <Card className="mb-4 scroll-mt-28">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <Film className="size-4" />
@@ -523,10 +474,116 @@ export default async function ProjectPage({ params }: PageProps) {
 
       {project.status === "ready" && highlights.length === 0 && (
         <Card className="border-dashed mb-4">
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            Analysis complete but no highlights were found. The video may be too
-            short for your clip-length range, or audio was uniformly quiet.
+          <CardContent className="py-8 space-y-3 text-center text-sm text-muted-foreground">
+            <p>
+              Analysis complete but no highlights were found. The video may be
+              too short for your clip-length range, or audio was uniformly
+              quiet.
+            </p>
+            {transcript && (
+              <div className="flex justify-center">
+                <ReanalyzeDialog
+                  projectId={id}
+                  savedModel={settings.analyzeModel}
+                  savedVibe={settings.vibe}
+                />
+              </div>
+            )}
           </CardContent>
+        </Card>
+      )}
+
+      {video ? (
+        <Card className="mb-4">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileVideo className="size-4" />
+              Source video
+            </CardTitle>
+            <CardDescription>
+              Stored under{" "}
+              <code className="text-xs">data/videos/{video.filePath}</code>
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
+            <div>
+              <span className="text-muted-foreground">Duration</span>
+              <p>{formatDuration(video.durationSeconds)}</p>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Size</span>
+              <p>{formatBytes(video.sizeBytes)}</p>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Resolution</span>
+              <p>
+                {video.width && video.height
+                  ? `${video.width}×${video.height}`
+                  : "—"}
+              </p>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Codec / FPS</span>
+              <p>
+                {[video.codec, video.fps ? `${video.fps.toFixed(2)} fps` : null]
+                  .filter(Boolean)
+                  .join(" · ") || "—"}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        !pipelineActive && (
+          <Card className="border-dashed mb-4">
+            <CardContent className="py-8 text-center text-sm text-muted-foreground">
+              No video file yet.
+            </CardContent>
+          </Card>
+        )
+      )}
+
+      {video && (
+        <Card className="mb-4">
+          <CardHeader>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <FileText className="size-4" />
+                  Transcript
+                </CardTitle>
+                <CardDescription>
+                  {transcript
+                    ? [
+                        transcript.language?.toUpperCase(),
+                        `${transcript.segmentCount} segments`,
+                        transcript.model,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")
+                    : "No transcript yet — upload one to skip auto-transcription, or wait for the worker."}
+                </CardDescription>
+              </div>
+              <TranscriptUploadDialog
+                projectId={id}
+                hasExistingTranscript={!!transcript}
+              />
+            </div>
+          </CardHeader>
+          {transcript && (
+            <CardContent className="space-y-2">
+              {transcript.fullText ? (
+                <div className="max-h-48 overflow-auto rounded-md bg-muted p-3 text-sm whitespace-pre-wrap leading-relaxed">
+                  {transcript.fullText.length > 1200
+                    ? transcript.fullText.slice(0, 1200) + "…"
+                    : transcript.fullText}
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No text extracted.
+                </p>
+              )}
+            </CardContent>
+          )}
         </Card>
       )}
 

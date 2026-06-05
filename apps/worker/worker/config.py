@@ -61,6 +61,75 @@ class Settings(BaseSettings):
     # ---- AI: highlights / thumbnails -------------------------------------
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     fal_api_key: str | None = Field(default=None, alias="FAL_API_KEY")
+    # Multimodal boundary refinement on suspect candidates (costly).
+    gemini_multimodal_enabled: bool = Field(
+        default=False, alias="GEMINI_MULTIMODAL_ENABLED"
+    )
+    # Gemini model IDs. Defaults track the newest Gemini 3.x releases.
+    # Docs: https://ai.google.dev/gemini-api/docs/models
+    #   - gemini-3.5-flash       : newest STABLE Flash (frontier, agentic) — default
+    #   - gemini-3.1-pro-preview : newest Pro (deepest reasoning, preview)
+    #   - gemini-3.1-flash-lite  : cheapest stable, high-volume
+    gemini_pro_model: str = Field(
+        default="gemini-3.1-pro-preview", alias="GEMINI_PRO_MODEL"
+    )
+    gemini_flash_model: str = Field(
+        default="gemini-3.5-flash", alias="GEMINI_FLASH_MODEL"
+    )
+    gemini_flash_lite_model: str = Field(
+        default="gemini-3.1-flash-lite", alias="GEMINI_FLASH_LITE_MODEL"
+    )
+    # Model used for the optional multimodal boundary-refinement pass.
+    gemini_multimodal_model: str = Field(
+        default="gemini-3.1-pro-preview", alias="GEMINI_MULTIMODAL_MODEL"
+    )
+    # Gemini 3.x reasoning effort: minimal | low | medium | high.
+    # "low" is the sweet spot for highlight ranking (analysis-grade, fast/cheap).
+    gemini_thinking_level: str = Field(
+        default="low", alias="GEMINI_THINKING_LEVEL"
+    )
+
+    # ---- AI: optional audio enrichment (AssemblyAI / Deepgram) ------------
+    enrichment_backend: str | None = Field(default=None, alias="ENRICHMENT_BACKEND")
+    assemblyai_api_key: str | None = Field(default=None, alias="ASSEMBLYAI_API_KEY")
+    deepgram_api_key: str | None = Field(default=None, alias="DEEPGRAM_API_KEY")
+
+    # ---- TwelveLabs video-native multimodal analysis ----------------------
+    twelvelabs_enabled: bool = Field(default=False, alias="TWELVELABS_ENABLED")
+    twelvelabs_api_key: str | None = Field(default=None, alias="TWELVELABS_API_KEY")
+    twelvelabs_index_id: str | None = Field(default=None, alias="TWELVELABS_INDEX_ID")
+    twelvelabs_model_marengo: str = Field(
+        default="marengo3.0", alias="TWELVELABS_MODEL_MARENGO"
+    )
+    twelvelabs_model_pegasus: str = Field(
+        default="pegasus1.5", alias="TWELVELABS_MODEL_PEGASUS"
+    )
+    twelvelabs_max_analyze_chunk_seconds: int = Field(
+        default=7200, alias="TWELVELABS_MAX_ANALYZE_CHUNK_SECONDS"
+    )
+    twelvelabs_chunk_overlap_seconds: int = Field(
+        default=15, alias="TWELVELABS_CHUNK_OVERLAP_SECONDS"
+    )
+    twelvelabs_max_search_results_per_query: int = Field(
+        default=10, alias="TWELVELABS_MAX_SEARCH_RESULTS_PER_QUERY"
+    )
+    twelvelabs_visual_candidate_limit: int = Field(
+        default=40, alias="TWELVELABS_VISUAL_CANDIDATE_LIMIT"
+    )
+    twelvelabs_min_visual_confidence: float = Field(
+        default=0.55, alias="TWELVELABS_MIN_VISUAL_CONFIDENCE"
+    )
+    twelvelabs_upload_full_video: bool = Field(
+        default=True, alias="TWELVELABS_UPLOAD_FULL_VIDEO"
+    )
+    twelvelabs_reuse_existing_index: bool = Field(
+        default=True, alias="TWELVELABS_REUSE_EXISTING_INDEX"
+    )
+    twelvelabs_fail_open: bool = Field(default=True, alias="TWELVELABS_FAIL_OPEN")
+    # TwelveLabs POST /tasks rejects files >= 2 GB — stay under with margin.
+    twelvelabs_max_upload_bytes: int = Field(
+        default=1_900_000_000, alias="TWELVELABS_MAX_UPLOAD_BYTES"
+    )
 
     # ---- Job loop tuning --------------------------------------------------
     job_poll_interval_seconds: float = Field(default=1.0)

@@ -206,16 +206,16 @@ export function CreateProjectForm() {
                   disabled={pending}
                   className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <option value="gemini-2.5-pro">
-                    gemini-2.5-pro — better narrative reasoning, ~$0.04/video
+                  <option value="flash">
+                    Flash — Gemini 3.5 Flash (frontier, fast + cheap)
                   </option>
-                  <option value="gemini-2.5-flash">
-                    gemini-2.5-flash — free tier, faster but blunter
+                  <option value="pro">
+                    Pro — Gemini 3.1 Pro (deepest reasoning)
                   </option>
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  Pro can shift clip start/end to capture buildup &
-                  reaction. Flash uses the candidates as-is.
+                  Both shift clip start/end to capture buildup & reaction. Pro
+                  reasons deeper on tricky boundaries; Flash is faster + cheaper.
                 </p>
               </div>
             </div>

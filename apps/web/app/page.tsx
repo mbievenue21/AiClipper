@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { desc } from "drizzle-orm";
-import { formatDistanceToNow } from "date-fns";
 import { FileVideo, Plus, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -11,23 +10,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { db, schema } from "@/lib/db/client";
+import { ProjectCard } from "./projects/project-card";
 
 // Force dynamic rendering; we always want the latest project list.
 export const dynamic = "force-dynamic";
-
-const statusVariants: Record<
-  string,
-  "default" | "secondary" | "destructive" | "outline"
-> = {
-  pending: "secondary",
-  ingesting: "secondary",
-  transcribing: "secondary",
-  analyzing: "secondary",
-  ready: "default",
-  failed: "destructive",
-};
 
 export default async function HomePage() {
   const projects = await db
@@ -77,27 +64,14 @@ export default async function HomePage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {projects.map((p) => (
-            <Link key={p.id} href={`/projects/${p.id}`} className="group">
-              <Card className="transition-colors hover:border-foreground/30">
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-2">
-                    <CardTitle className="line-clamp-2">{p.name}</CardTitle>
-                    <Badge variant={statusVariants[p.status] ?? "secondary"}>
-                      {p.status}
-                    </Badge>
-                  </div>
-                  {p.sourceUrl && (
-                    <CardDescription className="line-clamp-1">
-                      {p.sourceUrl}
-                    </CardDescription>
-                  )}
-                </CardHeader>
-                <CardContent className="text-xs text-muted-foreground">
-                  Created{" "}
-                  {formatDistanceToNow(p.createdAt, { addSuffix: true })}
-                </CardContent>
-              </Card>
-            </Link>
+            <ProjectCard
+              key={p.id}
+              id={p.id}
+              name={p.name}
+              status={p.status}
+              sourceUrl={p.sourceUrl}
+              createdAt={p.createdAt}
+            />
           ))}
         </div>
       )}

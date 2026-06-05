@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { and, eq, inArray, sql } from "drizzle-orm";
 
 import { db, schema } from "@/lib/db/client";
+import { deleteProjectPermanently } from "@/lib/projects/delete-project";
 import { callWorkerAdmin } from "@/lib/worker";
 
 export type AdminActionResult = {
@@ -114,7 +115,7 @@ export async function cancelPendingAction(): Promise<AdminActionResult> {
   }
 }
 
-/** Delete all projects in the `failed` status (and their child rows via FK cascade). */
+/** Delete all projects in the `failed` status (media + DB cascade). */
 export async function deleteFailedProjectsAction(): Promise<AdminActionResult> {
   const failedIds = db
     .select({ id: schema.projects.id })
@@ -127,36 +128,42 @@ export async function deleteFailedProjectsAction(): Promise<AdminActionResult> {
     return { ok: true, message: "No failed projects to delete." };
   }
 
-  const deleted = db
-    .delete(schema.projects)
-    .where(inArray(schema.projects.id, failedIds))
-    .run().changes;
+  let deleted = 0;
+  let jobsCancelled = 0;
+  let filesDeleted = 0;
+  for (const id of failedIds) {
+    const r = deleteProjectPermanently(id);
+    if (r.ok) deleted += 1;
+    jobsCancelled += r.jobsCancelled ?? 0;
+    filesDeleted += r.filesDeleted ?? 0;
+  }
 
   revalidatePath("/admin");
   revalidatePath("/");
+  revalidatePath("/storage");
   return {
     ok: true,
-    message: `Deleted ${deleted} failed project(s).`,
-    details: { deleted },
+    message: `Deleted ${deleted} failed project(s) · ${jobsCancelled} job(s) cancelled · ${filesDeleted} file(s) removed.`,
+    details: { deleted, jobsCancelled, filesDeleted },
   };
 }
 
-/** Delete a single project by id. */
+/** Delete a single project by id (jobs, media, and all DB rows). */
 export async function deleteProjectAction(
   projectId: string,
 ): Promise<AdminActionResult> {
-  const deleted = db
-    .delete(schema.projects)
-    .where(eq(schema.projects.id, projectId))
-    .run().changes;
+  const result = deleteProjectPermanently(projectId);
   revalidatePath("/admin");
   revalidatePath("/");
+  revalidatePath("/storage");
+  revalidatePath(`/projects/${projectId}`);
   return {
-    ok: deleted > 0,
-    message:
-      deleted > 0
-        ? `Deleted project ${projectId}.`
-        : `Project ${projectId} not found.`,
+    ok: result.ok,
+    message: result.message,
+    details: {
+      jobsCancelled: result.jobsCancelled ?? 0,
+      filesDeleted: result.filesDeleted ?? 0,
+    },
   };
 }
 

@@ -7,9 +7,12 @@ import { cn } from "@/lib/utils";
 const JOB_LABELS: Record<string, string> = {
   ingest: "Downloading video",
   transcribe: "Transcribing audio",
-  analyze: "Finding highlights",
+  twelvelabs_index: "TwelveLabs — indexing video",
+  twelvelabs_analyze: "TwelveLabs — visual analysis",
+  analyze: "Fusion + Gemini rerank",
   render: "Rendering clip",
   caption: "Burning captions",
+  reedit: "Saving clip edits",
   publish: "Publishing",
 };
 
@@ -25,13 +28,26 @@ type JobRow = {
 
 type StageState = "done" | "active" | "upcoming";
 
-const STAGES = [
+const BASE_STAGES = [
   { id: "ingest", label: "Ingest" },
   { id: "transcribe", label: "Transcribe" },
+] as const;
+
+const TL_STAGES = [
+  { id: "tl_index", label: "TL Index" },
+  { id: "tl_analyze", label: "TL Visual" },
+] as const;
+
+const TAIL_STAGES = [
   { id: "analyze", label: "Analyze" },
   { id: "highlights", label: "Highlights" },
   { id: "render", label: "Render" },
 ] as const;
+
+type StageId =
+  | (typeof BASE_STAGES)[number]["id"]
+  | (typeof TL_STAGES)[number]["id"]
+  | (typeof TAIL_STAGES)[number]["id"];
 
 function stageStates(input: {
   projectStatus: string;
@@ -40,9 +56,21 @@ function stageStates(input: {
   highlightCount: number;
   clipCount: number;
   activeJobTypes: Set<string>;
-}): Record<(typeof STAGES)[number]["id"], StageState> {
-  const { projectStatus, hasVideo, hasTranscript, highlightCount, clipCount, activeJobTypes } =
-    input;
+  twelvelabsEnabled: boolean;
+  twelvelabsIndexReady: boolean;
+  hasVisualSegments: boolean;
+}): Record<StageId, StageState> {
+  const {
+    projectStatus,
+    hasVideo,
+    hasTranscript,
+    highlightCount,
+    clipCount,
+    activeJobTypes,
+    twelvelabsEnabled,
+    twelvelabsIndexReady,
+    hasVisualSegments,
+  } = input;
 
   const ingest: StageState =
     projectStatus === "ingesting" || activeJobTypes.has("ingest")
@@ -60,14 +88,40 @@ function stageStates(input: {
           ? "upcoming"
           : "upcoming";
 
+  const tl_index: StageState = !twelvelabsEnabled
+    ? "upcoming"
+    : activeJobTypes.has("twelvelabs_index")
+      ? "active"
+      : twelvelabsIndexReady || hasVisualSegments
+        ? "done"
+        : transcribe === "done"
+          ? "upcoming"
+          : "upcoming";
+
+  const tl_analyze: StageState = !twelvelabsEnabled
+    ? "upcoming"
+    : activeJobTypes.has("twelvelabs_analyze")
+      ? "active"
+      : hasVisualSegments
+        ? "done"
+        : tl_index === "done"
+          ? "upcoming"
+          : "upcoming";
+
   const analyze: StageState =
     projectStatus === "analyzing" || activeJobTypes.has("analyze")
       ? "active"
       : highlightCount > 0 || (projectStatus === "ready" && hasTranscript)
         ? "done"
-        : transcribe === "done"
-          ? "upcoming"
-          : "upcoming";
+        : twelvelabsEnabled
+          ? tl_analyze === "done" || tl_index === "done"
+            ? "upcoming"
+            : transcribe === "done"
+              ? "upcoming"
+              : "upcoming"
+          : transcribe === "done"
+            ? "upcoming"
+            : "upcoming";
 
   const highlights: StageState =
     highlightCount > 0
@@ -87,7 +141,7 @@ function stageStates(input: {
           ? "upcoming"
           : "upcoming";
 
-  return { ingest, transcribe, analyze, highlights, render };
+  return { ingest, transcribe, tl_index, tl_analyze, analyze, highlights, render };
 }
 
 export function ProjectPipelinePanel({
@@ -98,6 +152,9 @@ export function ProjectPipelinePanel({
   clipCount,
   activeJobs,
   show,
+  twelvelabsEnabled = false,
+  twelvelabsIndexReady = false,
+  hasVisualSegments = false,
 }: {
   projectStatus: string;
   hasVideo: boolean;
@@ -106,6 +163,9 @@ export function ProjectPipelinePanel({
   clipCount: number;
   activeJobs: JobRow[];
   show: boolean;
+  twelvelabsEnabled?: boolean;
+  twelvelabsIndexReady?: boolean;
+  hasVisualSegments?: boolean;
 }) {
   if (!show) return null;
 
@@ -117,7 +177,16 @@ export function ProjectPipelinePanel({
     highlightCount,
     clipCount,
     activeJobTypes,
+    twelvelabsEnabled,
+    twelvelabsIndexReady,
+    hasVisualSegments,
   });
+
+  const stages = [
+    ...BASE_STAGES,
+    ...(twelvelabsEnabled ? TL_STAGES : []),
+    ...TAIL_STAGES,
+  ];
 
   return (
     <div className="sticky top-0 z-20 -mx-4 mb-4 border-b border-border/60 bg-background/90 px-4 py-3 backdrop-blur-md supports-[backdrop-filter]:bg-background/75">
@@ -133,12 +202,12 @@ export function ProjectPipelinePanel({
           </div>
 
           <ol className="flex flex-wrap items-center gap-1.5 sm:gap-2">
-            {STAGES.map((stage, idx) => {
+            {stages.map((stage, idx) => {
               const state = states[stage.id];
               return (
                 <li key={stage.id} className="flex items-center gap-1.5 sm:gap-2">
                   <StagePill label={stage.label} state={state} />
-                  {idx < STAGES.length - 1 && (
+                  {idx < stages.length - 1 && (
                     <span
                       className={cn(
                         "hidden h-px w-3 sm:block sm:w-5",

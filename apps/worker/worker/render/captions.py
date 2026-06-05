@@ -207,6 +207,34 @@ def chunk_segments(
     return out
 
 
+def segments_from_overrides(
+    overrides: list[dict[str, Any]],
+) -> list[CaptionSegment]:
+    """Build caption segments from user-edited segment-level overrides.
+
+    Times are clip-relative seconds. Word timings are evenly distributed
+    within each segment for karaoke/highlight styles.
+    """
+    out: list[CaptionSegment] = []
+    for raw in overrides:
+        text = _sanitize_caption_text(str(raw.get("text") or ""))
+        if not text:
+            continue
+        start = max(0.0, float(raw.get("start", 0.0)))
+        end = max(start + 0.05, float(raw.get("end", start + 1.0)))
+        tokens = text.split()
+        if not tokens:
+            continue
+        total = max(0.01, end - start)
+        per = total / len(tokens)
+        words = [
+            CaptionWord(text=tok, start=start + i * per, end=start + (i + 1) * per)
+            for i, tok in enumerate(tokens)
+        ]
+        out.append(CaptionSegment(start=start, end=end, words=words))
+    return out
+
+
 def _auto_font_size(
     *,
     width_px: int,

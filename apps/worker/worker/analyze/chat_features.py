@@ -47,6 +47,39 @@ class ChatDensitySeries:
         slice_ = self.normalised[i:j]
         return float(sum(slice_) / len(slice_)) if slice_ else 0.0
 
+    def peak_at_in_window(self, start: float, end: float) -> float | None:
+        if not self.normalised or end <= start:
+            return None
+        i = max(0, int(round(start)))
+        j = min(len(self.normalised), int(round(end)) + 1)
+        if j <= i:
+            return None
+        best_idx = max(range(i, j), key=lambda k: self.normalised[k])
+        return float(best_idx)
+
+    def top_messages_in_window(
+        self,
+        events: list[ChatEventOut],
+        start: float,
+        end: float,
+        *,
+        limit: int = 5,
+    ) -> list[ChatEventOut]:
+        """Return chat messages in window, preferring high-emote / notice messages."""
+        in_window = [
+            e
+            for e in events
+            if start <= e.timestamp_seconds <= end and (e.message or "").strip()
+        ]
+        in_window.sort(
+            key=lambda e: (
+                3.0 if e.message_type and e.message_type != "chat" else 0.0,
+                e.emote_count,
+            ),
+            reverse=True,
+        )
+        return in_window[:limit]
+
 
 def parse_twitch_chat(chat_json_path: Path) -> list[ChatEventOut]:
     """Yield events from a yt-dlp Twitch chat dump. Best-effort, swallows malformed rows."""

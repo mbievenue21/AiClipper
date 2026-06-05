@@ -1,16 +1,4 @@
-"""Analyze job handler.
-
-Reads transcript + audio + chat for a project, runs the analyze pipeline,
-and persists ``audio_features``, ``chat_events``, and ``highlights`` rows.
-
-Status flow:
-    project.status = "analyzing"   (set when we start)
-    project.status = "ready"       (set when we finish)
-    project.status = "failed"      (on exception)
-
-This is the last automatic stage of the pipeline today. Step 8 (clip render)
-will be triggered by the user clicking "approve" on a highlight in the UI.
-"""
+"""Analyze job handler."""
 
 from __future__ import annotations
 
@@ -26,17 +14,22 @@ from sqlalchemy import select
 from ..analyze import AnalysisInput, analyze_project
 from ..analyze.candidates import Segment
 from ..analyze.chat_features import iter_existing_events, parse_twitch_chat
+from ..analyze.scene_features import detect_scene_cuts_full
 from ..config import get_settings
 from ..db import session_scope
 from ..models import (
     AudioFeatures,
     ChatEvent,
+    ChatFeatures,
+    ExternalVideoIndex,
     Highlight,
     Project,
     Transcript,
     TranscriptSegment,
     Video,
+    VisualSegment,
 )
+from ..providers.twelvelabs_types import VisualSegmentResult
 from .handlers import ProgressReporter, register
 
 log = structlog.get_logger(__name__)
@@ -66,7 +59,6 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
 
     log.info("analyze_start", project_id=project_id)
 
-    # Phase 1: gather inputs from the database.
     with session_scope() as session:
         project = session.get(Project, project_id)
         if project is None:
@@ -110,6 +102,7 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
 
         settings = project.settings
         audio_rel = video.audio_path
+        video_rel = video.file_path
         chat_rel = video.chat_json_path
         duration = float(video.duration_seconds or 0.0)
         language = transcript.language
@@ -134,9 +127,72 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         had_audio_features = existing_audio_features is not None
         had_highlights = len(existing_highlights_count) > 0
 
+        # Load persisted scene cuts if available.
+        scene_cuts: list[float] = []
+        if video.scene_cuts_json:
+            try:
+                scene_cuts = json.loads(video.scene_cuts_json)
+            except json.JSONDecodeError:
+                scene_cuts = []
+
+        visual_rows = (
+            session.execute(
+                select(VisualSegment)
+                .where(VisualSegment.video_id == video_id)
+                .order_by(VisualSegment.start_seconds)
+            )
+            .scalars()
+            .all()
+        )
+        # A large VOD is split into multiple upload chunks, so there can be
+        # several ExternalVideoIndex rows per video. Fetch them all (don't use
+        # scalar_one_or_none — that raises MultipleResultsFound on >1 chunk).
+        twelvelabs_index_rows = (
+            session.execute(
+                select(ExternalVideoIndex)
+                .where(
+                    ExternalVideoIndex.project_id == project_id,
+                    ExternalVideoIndex.video_id == video_id,
+                    ExternalVideoIndex.provider == "twelvelabs",
+                )
+                .order_by(ExternalVideoIndex.updated_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+        # Treat the visual index as usable only when every chunk is ready
+        # (full timeline coverage).
+        twelvelabs_index_ready = bool(twelvelabs_index_rows) and all(
+            r.status == "ready" for r in twelvelabs_index_rows
+        )
+
         _set_project_status(session, project, "analyzing")
 
-    # Parse chat JSON only if we haven't already imported rows for this video.
+    visual_segments = [
+        VisualSegmentResult(
+            provider=row.provider,
+            model=row.model or "twelvelabs",
+            source_method=row.source_method,
+            start_seconds=float(row.start_seconds),
+            end_seconds=float(row.end_seconds),
+            segment_type=row.segment_type or "visual_payoff",
+            confidence=float(row.confidence or 0.5),
+            title=row.title,
+            description=row.description,
+            visual_reason=row.visual_reason,
+            audio_reason=row.audio_reason,
+            speech_reason=row.speech_reason,
+            chat_reason=row.chat_reason,
+            raw=json.loads(row.raw_json) if row.raw_json else {},
+        )
+        for row in visual_rows
+    ]
+    twelvelabs_used = bool(
+        payload.get("twelvelabs_used")
+        or visual_segments
+        or twelvelabs_index_ready
+    )
+
     new_chat_events_for_db = []
     if not already_have_chat_rows and chat_rel:
         chat_abs = _media_abs(chat_rel)
@@ -145,41 +201,35 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
             chat_events_internal = new_chat_events_for_db
             log.info("chat_imported_from_json", count=len(chat_events_internal))
 
-    # Phase 2: run the actual pipeline in a worker thread.
     audio_abs = _media_abs(audio_rel)
     if not audio_abs.exists():
         raise FileNotFoundError(f"audio file missing: {audio_abs}")
 
-    # Per-run model override: when the user triggers "Re-analyze" from the
-    # project page they can pick Flash vs Pro for that specific run without
-    # touching the saved project settings. The web layer puts the choice in
-    # the job payload under `analyze_model_override`.
-    analyze_model_override = payload.get("analyze_model_override")
-    if analyze_model_override and analyze_model_override in (
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-    ):
-        chosen_model = str(analyze_model_override)
-        log.info(
-            "analyze_model_overridden",
-            project_id=project_id,
-            override=chosen_model,
-            saved=settings.get("analyzeModel"),
-        )
-    else:
-        chosen_model = str(settings.get("analyzeModel", "gemini-2.5-pro"))
+    source_video_abs = _media_abs(video_rel) if video_rel else None
 
-    # Per-run vibe / creator brief override (re-analyze dialog).
-    vibe_override = payload.get("vibe_override")
-    if vibe_override is not None:
-        chosen_vibe = str(vibe_override).strip()
-        log.info(
-            "analyze_vibe_overridden",
-            project_id=project_id,
-            override_len=len(chosen_vibe),
-        )
+    # Detect scene cuts once per video if not already stored.
+    if not scene_cuts and source_video_abs and source_video_abs.exists():
+        progress(0.02, "detecting scene cuts")
+        try:
+            scene_cuts = await detect_scene_cuts_full(source_video_abs)
+            log.info("scene_cuts_detected", count=len(scene_cuts))
+        except Exception as exc:
+            log.warning("scene_cuts_failed", error=str(exc))
+
+    # Accept logical tiers ("pro"/"flash"), legacy IDs ("gemini-2.5-*"), or an
+    # explicit model string. gemini.resolve_model() maps these to current IDs.
+    analyze_model_override = payload.get("analyze_model_override")
+    if analyze_model_override:
+        chosen_model = str(analyze_model_override)
     else:
-        chosen_vibe = str(settings.get("vibe", "") or "")
+        chosen_model = str(settings.get("analyzeModel") or "flash")
+
+    vibe_override = payload.get("vibe_override")
+    chosen_vibe = (
+        str(vibe_override).strip()
+        if vibe_override is not None
+        else str(settings.get("vibe", "") or "")
+    )
 
     analysis_input = AnalysisInput(
         audio_path=audio_abs,
@@ -194,6 +244,10 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         pre_roll_seconds=float(settings.get("preRollSeconds", 8)),
         tail_padding_seconds=float(settings.get("tailPaddingSeconds", 2)),
         analyze_model=chosen_model,
+        source_video_path=source_video_abs,
+        scene_cuts=scene_cuts,
+        visual_segments=visual_segments or None,
+        twelvelabs_used=twelvelabs_used,
     )
 
     try:
@@ -208,10 +262,12 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
                 _set_project_status(session, project, "failed", note=str(exc)[:2000])
         raise
 
-    # Phase 3: persist everything.
     progress(0.97, "saving highlights")
     with session_scope() as session:
-        # Audio features (one row per video). Replace any existing row.
+        video_row = session.get(Video, video_id)
+        if video_row is not None and result.scene_cuts:
+            video_row.scene_cuts_json = json.dumps(result.scene_cuts)
+
         if had_audio_features:
             session.execute(
                 select(AudioFeatures).where(AudioFeatures.video_id == video_id)
@@ -221,7 +277,22 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
             af.samples = result.audio_series.samples
             session.add(af)
 
-        # Newly parsed chat events.
+        # Persist chat density series.
+        existing_cf = session.execute(
+            select(ChatFeatures).where(ChatFeatures.video_id == video_id)
+        ).scalar_one_or_none()
+        chat_density_payload = {
+            "rawPerSecond": result.chat_density.raw_per_second,
+            "normalised": result.chat_density.normalised,
+            "totalMessages": result.chat_density.total_messages,
+        }
+        if existing_cf:
+            existing_cf.density_json = json.dumps(chat_density_payload)
+        else:
+            cf = ChatFeatures(video_id=video_id)
+            cf.density_json = json.dumps(chat_density_payload)
+            session.add(cf)
+
         if new_chat_events_for_db:
             for ev in new_chat_events_for_db:
                 session.add(
@@ -235,7 +306,6 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
                     )
                 )
 
-        # Highlights: clear and re-insert so re-running analyze produces a clean set.
         if had_highlights:
             for h in (
                 session.execute(
@@ -276,11 +346,16 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         used_llm=result.used_llm,
     )
 
+    from ..analyze.gemini import resolve_model
+
     return {
         "project_id": project_id,
         "video_id": video_id,
         "highlight_count": len(result.highlights),
         "candidate_count": len(result.candidates),
         "used_llm": result.used_llm,
+        "analyze_model": resolve_model(chosen_model),
+        "twelvelabs_used": twelvelabs_used,
+        "visual_segment_count": len(visual_segments),
         "notes": result.notes,
     }

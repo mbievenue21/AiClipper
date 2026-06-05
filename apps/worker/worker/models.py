@@ -98,6 +98,7 @@ class Video(Base):
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     audio_path: Mapped[str | None] = mapped_column(Text)
     chat_json_path: Mapped[str | None] = mapped_column(Text)
+    scene_cuts_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
 
     project: Mapped[Project] = relationship(back_populates="videos")
@@ -189,6 +190,17 @@ class AudioFeatures(Base):
         self.samples_json = json.dumps(value)
 
 
+class ChatFeatures(Base):
+    __tablename__ = "chat_features"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    video_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    density_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+
 class Highlight(Base):
     __tablename__ = "highlights"
 
@@ -240,6 +252,13 @@ class Clip(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="rendering")
     dominant_color: Mapped[str | None] = mapped_column(Text)
     caption_style_json: Mapped[str | None] = mapped_column(Text)
+    trim_start_seconds: Mapped[float | None] = mapped_column(Float)
+    trim_end_seconds: Mapped[float | None] = mapped_column(Float)
+    caption_segments_json: Mapped[str | None] = mapped_column(Text)
+    parent_clip_id: Mapped[str | None] = mapped_column(Text)
+    version_label: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    superseded_at: Mapped[int | None] = mapped_column(BigInteger)
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
     updated_at: Mapped[int] = mapped_column(
@@ -318,6 +337,105 @@ class ScheduledUpload(Base):
     @tags.setter
     def tags(self, value: list[str] | None) -> None:
         self.tags_json = json.dumps(value) if value else None
+
+
+class ExternalVideoIndex(Base):
+    __tablename__ = "external_video_indexes"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    video_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    provider_index_id: Mapped[str | None] = mapped_column(Text)
+    provider_video_id: Mapped[str | None] = mapped_column(Text)
+    provider_task_id: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
+    source_path: Mapped[str | None] = mapped_column(Text)
+    source_sha256: Mapped[str | None] = mapped_column(Text)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    chunk_start_seconds: Mapped[float | None] = mapped_column(Float, default=0.0)
+    chunk_end_seconds: Mapped[float | None] = mapped_column(Float)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
+    )
+
+
+class VisualSegment(Base):
+    __tablename__ = "visual_segments"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    video_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(Text)
+    source_method: Mapped[str] = mapped_column(Text, nullable=False)
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    segment_type: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    title: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)
+    visual_reason: Mapped[str | None] = mapped_column(Text)
+    audio_reason: Mapped[str | None] = mapped_column(Text)
+    speech_reason: Mapped[str | None] = mapped_column(Text)
+    chat_reason: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
+    )
+
+
+class HighlightCandidate(Base):
+    __tablename__ = "highlight_candidates"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    video_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    seed_source: Mapped[str | None] = mapped_column(Text)
+    moment_type: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    local_score: Mapped[float | None] = mapped_column(Float)
+    transcript_score: Mapped[float | None] = mapped_column(Float)
+    audio_score: Mapped[float | None] = mapped_column(Float)
+    chat_score: Mapped[float | None] = mapped_column(Float)
+    scene_score: Mapped[float | None] = mapped_column(Float)
+    visual_score: Mapped[float | None] = mapped_column(Float)
+    multimodal_score: Mapped[float | None] = mapped_column(Float)
+    fusion_score: Mapped[float | None] = mapped_column(Float)
+    audio_peak_at: Mapped[float | None] = mapped_column(Float)
+    chat_peak_at: Mapped[float | None] = mapped_column(Float)
+    visual_peak_at: Mapped[float | None] = mapped_column(Float)
+    title: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    reason_json: Mapped[str | None] = mapped_column(Text)
+    raw_provider_json: Mapped[str | None] = mapped_column(Text)
+    selected_for_rerank: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    selected_as_highlight: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
+    )
 
 
 class Job(Base):

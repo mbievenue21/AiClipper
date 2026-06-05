@@ -7,14 +7,18 @@ import { z } from "zod";
 import { db, schema } from "@/lib/db/client";
 import {
   DEFAULT_CAPTION_SETTINGS,
+  ANALYZE_MODEL_LABELS,
   DEFAULT_PROJECT_SETTINGS,
+  normalizeAnalyzeModel,
   type CaptionFont,
   type CaptionStyle,
+  type CaptionSegmentOverride,
   type ClipCaptionSettings,
   type GeneratedUploadMetadata,
   type ProjectSettings,
 } from "@/lib/db/schema";
 import { enqueueJob } from "@/lib/worker";
+import { deleteProjectPermanently } from "@/lib/projects/delete-project";
 import { generateMetadata, MetadataGenerationError } from "@/lib/ai/metadata";
 import {
   getTrendingTags,
@@ -167,6 +171,81 @@ export async function deleteClipAction(formData: FormData) {
   return { ok: true as const, message: "Clip removed." };
 }
 
+const captionSegmentSchema = z.object({
+  start: z.number().min(0),
+  end: z.number().min(0),
+  text: z.string().max(500),
+});
+
+const saveClipEditSchema = z.object({
+  projectId: z.string().min(1),
+  clipId: z.string().min(1),
+  trimStart: z.number().min(0),
+  trimEnd: z.number().min(0),
+  captionSegments: z.array(captionSegmentSchema),
+  replaceOriginal: z.boolean(),
+});
+
+/**
+ * Save clip editor changes: re-cut from source + re-burn captions.
+ */
+export async function saveClipEditAction(input: {
+  projectId: string;
+  clipId: string;
+  trimStart: number;
+  trimEnd: number;
+  captionSegments: CaptionSegmentOverride[];
+  replaceOriginal: boolean;
+}) {
+  const parsed = saveClipEditSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      ok: false as const,
+      message: parsed.error.issues.map((i) => i.message).join("; "),
+    };
+  }
+
+  const clip = db
+    .select()
+    .from(schema.clips)
+    .where(eq(schema.clips.id, parsed.data.clipId))
+    .limit(1)
+    .all()[0];
+  if (!clip) {
+    return { ok: false as const, message: "Clip not found." };
+  }
+
+  const style = (clip.captionStyleJson as ClipCaptionSettings) ?? DEFAULT_CAPTION_SETTINGS;
+
+  try {
+    await enqueueJob({
+      type: "reedit",
+      project_id: parsed.data.projectId,
+      payload: {
+        parent_clip_id: parsed.data.clipId,
+        clip_id: parsed.data.clipId,
+        trim_start: parsed.data.trimStart,
+        trim_end: parsed.data.trimEnd,
+        caption_segments: parsed.data.captionSegments,
+        caption_style: style,
+        replace_original: parsed.data.replaceOriginal,
+        burn_captions: true,
+        version_label: parsed.data.replaceOriginal
+          ? null
+          : `Edited ${new Date().toLocaleString()}`,
+      },
+    });
+  } catch (err) {
+    return {
+      ok: false as const,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  revalidatePath(`/projects/${parsed.data.projectId}`);
+  return { ok: true as const, message: "Re-edit job queued." };
+}
+
 // -------------------------------------------------------------------------
 // Scheduled uploads (Step 12 + 13)
 // -------------------------------------------------------------------------
@@ -304,13 +383,14 @@ const reanalyzeSchema = z.object({
   // Empty string / null = "use whatever's saved on the project"; the worker
   // will fall back to the project's `analyzeModel` setting.
   modelOverride: z
-    .union([z.literal("gemini-2.5-pro"), z.literal("gemini-2.5-flash"), z.literal("")])
+    .union([z.literal("pro"), z.literal("flash"), z.literal("")])
     .optional(),
   /** Per-run creator brief passed to Gemini (maps to project `vibe`). */
   vibeOverride: z.string().max(500).optional(),
   /** Also persist the override to the project's saved settings. */
   persistAsDefault: z.boolean().optional(),
   persistVibeAsDefault: z.boolean().optional(),
+  reanalysisMode: z.enum(["local_only", "visual_only", "full"]).optional(),
 });
 
 /**
@@ -332,10 +412,11 @@ const reanalyzeSchema = z.object({
  */
 export async function reanalyzeProjectAction(input: {
   projectId: string;
-  modelOverride?: "gemini-2.5-pro" | "gemini-2.5-flash" | "";
+  modelOverride?: "pro" | "flash" | "";
   vibeOverride?: string;
   persistAsDefault?: boolean;
   persistVibeAsDefault?: boolean;
+  reanalysisMode?: "local_only" | "visual_only" | "full";
 }): Promise<ReanalyzeResult> {
   const parsed = reanalyzeSchema.safeParse(input);
   if (!parsed.success) {
@@ -347,6 +428,7 @@ export async function reanalyzeProjectAction(input: {
     vibeOverride,
     persistAsDefault,
     persistVibeAsDefault,
+    reanalysisMode,
   } = parsed.data;
 
   const project = db
@@ -394,11 +476,14 @@ export async function reanalyzeProjectAction(input: {
     ...DEFAULT_PROJECT_SETTINGS,
     ...((project.settingsJson as Partial<ProjectSettings>) ?? {}),
   };
-  const savedModel: ProjectSettings["analyzeModel"] =
-    currentSettings.analyzeModel || "gemini-2.5-pro";
+  const savedModel: ProjectSettings["analyzeModel"] = normalizeAnalyzeModel(
+    currentSettings.analyzeModel,
+  );
   const savedVibe = currentSettings.vibe || "";
-  const effectiveModel: string =
+  const effectiveTier: ProjectSettings["analyzeModel"] =
     modelOverride && modelOverride.length > 0 ? modelOverride : savedModel;
+  const effectiveModel: string =
+    ANALYZE_MODEL_LABELS[effectiveTier] ?? effectiveTier;
   const trimmedVibe = vibeOverride?.trim() ?? "";
   const effectiveVibe =
     trimmedVibe.length > 0 ? trimmedVibe : savedVibe;
@@ -469,14 +554,19 @@ export async function reanalyzeProjectAction(input: {
     .where(eq(schema.projects.id, projectId))
     .run();
 
+  const mode = reanalysisMode ?? "full";
+  const twelvelabsEnabled = process.env.TWELVELABS_ENABLED === "true";
+  const useVisualPass =
+    twelvelabsEnabled && (mode === "visual_only" || mode === "full");
+  const jobType = useVisualPass ? "twelvelabs_analyze" : "analyze";
+
   const job = await enqueueJob({
-    type: "analyze",
+    type: jobType,
     project_id: projectId,
     payload: {
       project_id: projectId,
       video_id: video.id,
-      // The worker reads this and uses it INSTEAD of settings.analyzeModel
-      // for this single run. Persistence is handled above.
+      reanalysis_mode: mode,
       analyze_model_override:
         modelOverride && modelOverride.length > 0 ? modelOverride : undefined,
       vibe_override: trimmedVibe.length > 0 ? trimmedVibe : undefined,
@@ -762,4 +852,42 @@ export async function getTrendingTagSuggestionsAction(input: {
           : String(err);
     return { ok: false, message: msg };
   }
+}
+
+const deleteProjectSchema = z.object({
+  projectId: z.string().min(1),
+  confirm: z.literal("DELETE"),
+});
+
+export type DeleteProjectActionResult = {
+  ok: boolean;
+  message: string;
+};
+
+/**
+ * Permanently delete a project: cancel jobs, wipe media on disk, cascade DB.
+ */
+export async function deleteProjectPermanentlyAction(input: {
+  projectId: string;
+  confirm: string;
+}): Promise<DeleteProjectActionResult> {
+  const parsed = deleteProjectSchema.safeParse({
+    projectId: input.projectId,
+    confirm: input.confirm.trim().toUpperCase(),
+  });
+  if (!parsed.success) {
+    return {
+      ok: false,
+      message: 'Type DELETE (all caps) to confirm permanent deletion.',
+    };
+  }
+
+  const result = deleteProjectPermanently(parsed.data.projectId);
+
+  revalidatePath("/");
+  revalidatePath("/admin");
+  revalidatePath("/storage");
+  revalidatePath(`/projects/${parsed.data.projectId}`);
+
+  return { ok: result.ok, message: result.message };
 }

@@ -1,426 +1,250 @@
 # AiClipper
 
-A personal-use web app that ingests long-form videos (Twitch / YouTube VODs,
-local files) and uses AI to extract short highlight clips, generate captions
-and thumbnails, and schedule uploads to YouTube and Instagram Reels.
+Personal-use app: paste a long-form VOD URL, run a staged pipeline (download → transcribe → optional TwelveLabs visual → Gemini-ranked highlights → render clips with captions → schedule YouTube / Instagram uploads). Monorepo, SQLite, mostly local media processing.
 
-Built to be **cheap to run** (mostly local, no managed cloud infra) and
-**accurate** (multi-signal highlight detection: chat density, audio energy,
-LLM transcript ranking).
+---
 
-## Architecture
+## Status at a glance
+
+### Working
+
+| Area | Notes |
+|------|--------|
+| **Ingest** | yt-dlp download, ffprobe, `audio.wav` extraction |
+| **Transcribe** | faster-whisper (local GPU/CPU) or Groq Whisper API |
+| **TwelveLabs index** | v1.3 assets API, multipart upload, ffmpeg chunking for files &gt; ~2 GB |
+| **TwelveLabs visual (partial)** | Pegasus segmentation on shorter chunks; visual segments fused into highlight candidates |
+| **Analyze** | librosa audio, optional chat density, PySceneDetect cuts, candidate fusion, **Gemini 3.x** rerank |
+| **Highlights UI** | Top-N candidates with scores, titles, signal breakdown |
+| **Render + captions** | FFmpeg cut/reformat, libass caption burn-in |
+| **Clip editor** | Trim timeline, caption segment edits, re-render via `reedit` job |
+| **Live progress** | SSE on project page + pipeline stage pills |
+| **Publish** | YouTube OAuth + Instagram Reels (scheduled or immediate) |
+| **Ops** | Project delete (DB + disk), `/admin` cleanup, stuck-job heal |
+
+### Known issues / gaps
+
+| Issue | What’s going on |
+|-------|------------------|
+| **Pegasus timeout** | Sync `POST /analyze` on long chunks (~28 min of video) exceeds the worker’s **120 s HTTP read timeout**. Shorter tail chunks succeed; long first chunk fails open to Marengo-only. **Fix needed:** async `/analyze/tasks` for long windows and/or a longer analyze timeout. |
+| **Marengo search (0 hits)** | `POST /search` runs (23 queries/chunk) but often returns **0 hits** in practice. Pipeline still works via Pegasus + local signals; Marengo fusion is weak until queries/index tuning is improved. |
+| **Analysis speed** | Long VODs are slow end-to-end: TL **multipart upload** (15–30+ min for ~1.7 GB), **scene detection** (~5 min on 36 min VOD), TL indexing poll, then Gemini. Expect **30–45+ min** for a 2 GB / ~36 min stream with TwelveLabs enabled. |
+| **Chat signal** | Some yt-dlp builds lack `--write-chat`; chat density stays zero (logged, non-fatal). |
+| **Thumbnails** | Frame + Satori step not implemented (intentionally skipped). |
+
+---
+
+## Pipeline flow (ingest → highlights)
+
+Default job chain when `TWELVELABS_ENABLED=true`. Without TwelveLabs, transcribe enqueues `analyze` directly.
 
 ```
-┌─────────────────────────────┐         ┌────────────────────────────┐
-│  apps/web  (Next.js 15)     │ ──HTTP─▶│  apps/worker  (Python)     │
-│  - UI, project management   │         │  - yt-dlp, ffmpeg          │
-│  - Drizzle ORM → SQLite     │◀──SSE───│  - faster-whisper (GPU)    │
-│  - shadcn/ui                │         │  - Gemini Flash, librosa   │
-│  port 3000                  │         │  port 8000                 │
-└──────────────┬──────────────┘         └─────────────┬──────────────┘
-               │                                      │
-               ▼                                      ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │  data/app.db  (SQLite, shared)   data/videos/  (media files) │
-  └──────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-                ┌─────────────────────────────────┐
-                │  External APIs                  │
-                │  • Google Gemini (highlights)   │
-                │  • YouTube Data API (upload)    │
-                │  • Instagram Graph API (Reels)  │
-                └─────────────────────────────────┘
+User URL (UI)
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. INGEST          job: ingest                                            │
+│    yt-dlp → source.mp4    ffmpeg/ffprobe → audio.wav (16 kHz mono)       │
+│    Stack: yt-dlp, FFmpeg, Python worker (FastAPI job loop)               │
+└─────────────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 2. TRANSCRIBE      job: transcribe                                        │
+│    Local: faster-whisper (CTranslate2, CUDA or CPU)                       │
+│    Or: Groq API — whisper-large-v3                                       │
+│    Out: transcripts + transcript_segments (word timestamps)             │
+└─────────────────────────────────────────────────────────────────────────┘
+    │
+    ▼  (if TWELVELABS_ENABLED)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 3. TL INDEX        job: twelvelabs_index                                │
+│    ffmpeg splits VOD if &gt; TWELVELABS_MAX_UPLOAD_BYTES (~1.9 GB)        │
+│    TwelveLabs v1.3: multipart asset upload → index-content               │
+│    APIs: POST /assets, /assets/multipart-uploads, /indexes/…/indexed-assets │
+│    Out: external_video_indexes rows (per chunk)                          │
+└─────────────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 4. TL VISUAL       job: twelvelabs_analyze                                │
+│    Pegasus 1.5 — POST /analyze (sync) or /analyze/tasks (async, long)   │
+│    Marengo 3.0 — POST /search (multipart, visual+audio)                   │
+│    Out: visual_segments table                                            │
+└─────────────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 5. ANALYZE         job: analyze                                           │
+│    PySceneDetect — scene cuts (local)                                     │
+│    librosa — RMS + onset excitement curve                                 │
+│    Optional — Twitch chat density from ingested chat file                 │
+│    Candidates — sliding windows over transcript + audio/chat/TL visual    │
+│    Gemini 3.5 Flash / 3.1 Pro — rerank top candidates (google-genai)    │
+│    Optional — Gemini multimodal boundary refine (env flag)                │
+│    Out: highlights (top N per project settings)                           │
+│    Project status → ready                                                 │
+└─────────────────────────────────────────────────────────────────────────┘
+    │
+    ▼  (user-driven)
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 6. RENDER          job: render — FFmpeg scene-snap, aspect crop/blur fill │
+│ 7. CAPTION         job: caption — libass ASS burn-in                      │
+│ 8. REEDIT          job: reedit — trim/caption overrides from clip editor  │
+│ 9. PUBLISH         job: publish — YouTube Data API / Instagram Graph API  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Project structure
+### Stack summary
 
-```
-AiClipper/
-├── apps/
-│   ├── web/          # Next.js 15 frontend + thin API layer
-│   └── worker/       # Python FastAPI: AI + video processing
-├── packages/
-│   └── remotion/     # Caption-overlay video templates
-├── data/
-│   ├── app.db        # SQLite (gitignored)
-│   └── videos/       # Source videos, clips, thumbnails (gitignored)
-├── scripts/          # One-off utility scripts
-├── .env              # Local secrets (gitignored)
-└── .env.example      # Template documenting all env vars
-```
+| Layer | Tech |
+|-------|------|
+| **UI** | Next.js 15 App Router, React, Tailwind, shadcn/ui |
+| **Web DB** | Drizzle ORM → SQLite (`data/app.db`) |
+| **Worker** | Python 3.11, FastAPI, SQLAlchemy, structlog |
+| **Media** | yt-dlp, FFmpeg, librosa, PySceneDetect, Pillow |
+| **Transcription** | faster-whisper or Groq Whisper |
+| **Video AI** | TwelveLabs v1.3 (Pegasus 1.5, Marengo 3.0) — optional |
+| **Text AI** | Google Gemini API (`google-genai`) — rerank + metadata |
+| **Captions** | libass via FFmpeg (`packages/remotion` for future) |
+| **Progress** | SSE `GET /api/projects/:id/events` |
+
+---
 
 ## Quick start
 
 ```powershell
-# From the repo root
 pnpm install
-
-# Python worker venv + ingest extras (yt-dlp Python package)
 pnpm --filter worker run setup
 pnpm --filter worker run setup:ingest
-
-# System tools for ingest (must be on PATH — see Setup below)
-#   yt-dlp, ffmpeg, ffprobe
+# Optional: pnpm --filter worker run setup:transcribe
+# Optional: pnpm --filter worker run setup:analyze
 
 Copy-Item .env.example .env
+# Set GEMINI_API_KEY (required for LLM rerank)
+# Set TWELVELABS_* if using visual analysis
+
 pnpm db:migrate
 pnpm dev
 ```
 
-Open <http://localhost:3000>, click **New project**, paste a YouTube or Twitch VOD URL, and watch the project page while the worker downloads the video.
+- App: <http://localhost:3000>
+- Worker health: <http://127.0.0.1:8000/health>
 
-Worker health check: <http://127.0.0.1:8000/health> — expect `"ingest": true` in `capabilities` and `"ingest"` in `registered_handlers`.
+Paste a URL on **New project**, open the project page for live pipeline progress.
 
-## Setup
+---
 
-### Prerequisites
+## Environment (minimum)
 
-| Tool | Used for |
-|------|----------|
-| Node.js 22+ (LTS) | Next.js, pnpm |
-| pnpm 11+ | Monorepo scripts |
-| Python 3.11 | Worker |
-| **yt-dlp** | Download source video (Step 5) |
-| **ffmpeg** + **ffprobe** | Merge/probe video, extract audio (Step 5+) |
-| Git | Version control |
-| NVIDIA GPU + drivers (optional) | Local Whisper in Step 6 |
+| Variable | Purpose |
+|----------|---------|
+| `GEMINI_API_KEY` | Highlight rerank (core) |
+| `GEMINI_FLASH_MODEL` / `GEMINI_PRO_MODEL` | Default `gemini-3.5-flash` / `gemini-3.1-pro-preview` |
+| `TWELVELABS_ENABLED` + `TWELVELABS_API_KEY` + `TWELVELABS_INDEX_ID` | Optional visual pipeline |
+| `GROQ_API_KEY` + `TRANSCRIBE_BACKEND=groq` | Fast hosted transcription |
+| `YOUTUBE_*` / `INSTAGRAM_*` | Publishing only |
 
-Install **yt-dlp** and **FFmpeg** on Windows (pick one):
+Full list: `.env.example`.
+
+---
+
+## Prerequisites
+
+| Tool | Role |
+|------|------|
+| Node 22+, pnpm 11+ | Web app |
+| Python 3.11 | Worker venv (`apps/worker/.venv`) |
+| yt-dlp, ffmpeg, ffprobe | Ingest (on PATH) |
+| NVIDIA + CUDA (optional) | GPU Whisper |
+
+Windows:
 
 ```powershell
 winget install yt-dlp.yt-dlp
 winget install Gyan.FFmpeg
 ```
 
-After install, ensure their `bin` folders are on your user **PATH**, then open a **new** terminal and verify:
+---
+
+## Project layout
+
+```
+AiClipper/
+├── apps/web/           # Next.js UI + API routes
+├── apps/worker/        # Python worker (jobs/, analyze/, providers/)
+├── packages/remotion/  # Future rich captions
+├── data/app.db         # SQLite (gitignored)
+└── data/videos/        # Per-project media (gitignored)
+```
+
+---
+
+## Verify (smoke scripts)
 
 ```powershell
-yt-dlp --version
-ffmpeg -version
-ffprobe -version
-```
-
-### Windows notes
-
-- **pnpm**: If `pnpm` is not recognized, add `C:\Program Files\nodejs` and `%APPDATA%\npm` to your user PATH.
-- **PowerShell scripts**: If `pnpm` fails with an execution-policy error, run once:  
-  `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
-- **Python**: Use `pnpm --filter worker run setup` (not bare `python`) so the venv is created via the `py` launcher. The worker `setup` script uses `py -3 -m venv`.
-- **Ports**: Stop any old `pnpm dev` with `Ctrl+C` before restarting. If port 3000 or 8000 is stuck, kill orphaned `node` / `python` processes from a previous dev session.
-
-### Required API keys
-
-| Service | Where to get it | Required for |
-|---|---|---|
-| Google Gemini | <https://aistudio.google.com/apikey> | Highlight detection (core) |
-| Groq (optional) | <https://console.groq.com/keys> | Whisper API fallback |
-| YouTube OAuth | <https://console.cloud.google.com/apis/credentials> | Scheduled uploads |
-| Instagram (Meta) | <https://developers.facebook.com/apps/> | Reels uploads |
-
-## Build progress
-
-- [x] Step 1 — Prerequisites + workspace bootstrap
-- [x] Step 2 — Next.js scaffold (Tailwind, shadcn/ui, project list)
-- [x] Step 3 — Drizzle schema + SQLite migration (11 tables, FK cascades)
-- [x] Step 4 — Python FastAPI worker (job loop, SQLAlchemy mirror, health endpoint)
-- [x] Step 5 — End-to-end ingest pipeline (yt-dlp download)
-- [x] Step 6 — Transcription stage (faster-whisper local GPU)
-
-### Step 5 — What works today
-
-1. **Web**: `/projects/new` — paste a YouTube or Twitch URL → creates a `projects` row and enqueues an `ingest` job on the worker.
-2. **Worker**: Downloads with yt-dlp to `data/videos/{project_id}/source.mp4`, probes metadata with ffprobe, extracts `audio.wav` (16 kHz mono for transcription), writes a `videos` row.
-3. **Web**: `/projects/{id}` — live job progress (page refresh while running) and source file metadata when complete.
-
-Ingest outputs per project:
-
-```
-data/videos/{project_id}/
-  source.mp4    # merged source video
-  audio.wav     # mono 16 kHz for Step 6
-```
-
-### Verify Step 5
-
-```powershell
-# Handler registered (no network)
 cd apps\worker
 .venv\Scripts\python scripts\smoke_ingest.py
-
-# Full stack
-pnpm dev
-# → http://localhost:3000/projects/new → short public YouTube URL
-# → confirm files under data/videos/{id}/ and job status succeeded in UI or:
-pnpm db:studio
-```
-
-### Step 6 — What works today
-
-After ingest finishes, the worker now auto-enqueues a **transcribe** job that
-runs faster-whisper against `audio.wav` and writes the result to the
-`transcripts` + `transcript_segments` tables.
-
-- **Backend selection:** auto-picks CUDA if available, otherwise CPU + int8.
-- **Word timestamps:** stored as JSON on each segment for karaoke captions (Step 9) and snap-to-word clip cutting (Step 8).
-- **VAD filter:** silence is skipped, so long VODs transcribe faster.
-- **Model cache:** the loaded WhisperModel is reused across jobs in the same worker process (load ≈ 30 s for `large-v3`).
-- **Project status:** `pending → ingesting → pending → transcribing → analyzing → ready` (the `analyzing` stage was added in Step 7).
-
-What lands in the DB after a successful transcribe:
-
-```text
-transcripts        1 row per video  (language, model, full_text)
-transcript_segments  N rows         (start_seconds, end_seconds, text, words_json)
-```
-
-### Install Step 6
-
-```powershell
-pnpm --filter worker run setup:transcribe   # installs faster-whisper + ctranslate2
-```
-
-**GPU notes (Windows):** faster-whisper needs cuBLAS and cuDNN at runtime.
-If you installed the CUDA Toolkit those DLLs are already on PATH. If you
-don't have them, the worker falls back to CPU + int8 automatically — slower
-but still works. To force CPU explicitly, set `WHISPER_COMPUTE_TYPE=int8`
-in `.env`.
-
-**First run downloads model weights** to `~/.cache/huggingface/hub/` (~3 GB
-for `large-v3`, ~470 MB for `small`). Override `WHISPER_MODEL=small` in `.env`
-for much faster initial setup with very usable quality.
-
-### Verify Step 6
-
-```powershell
-# Handler registered + faster-whisper imports + device detection (no model load)
-cd apps\worker
 .venv\Scripts\python scripts\smoke_transcribe.py
-```
-
-End-to-end: submit a short YouTube URL in the UI and watch the project page.
-You should see the **Ingest** job complete, then a **Transcribe** job appear
-and progress to 100 %, and finally a **Transcript** card with the language,
-segment count, and a preview of the full text.
-
-### Step 7 — What works today
-
-After transcription, the worker auto-enqueues an **analyze** job that turns
-the transcript + audio + (optional) chat into a ranked list of highlight
-clips:
-
-1. **`librosa`** computes a per-second "excitement" curve from RMS energy +
-   onset strength. Saved to the `audio_features` table.
-2. **Twitch chat replay** (if `ingest` captured one) is parsed into
-   `chat_events` rows and binned into a per-second density curve.
-3. A **sliding-window scorer** walks the transcript and produces candidate
-   clips that respect the user's min/max length, blending audio + chat +
-   keyword signals and applying non-max suppression.
-4. **Gemini 2.5 Flash** reranks the top ~15 candidates against the user's
-   "vibe" hint and writes punchy titles + 1–2 sentence summaries.
-   If `GEMINI_API_KEY` is missing, the pipeline degrades gracefully to
-   local scoring with auto-generated titles.
-5. The final top-N highlights land in the `highlights` table with
-   `score`, `title`, `summary`, and a `reasonJson` blob that records every
-   signal that contributed.
-
-#### User-configurable settings (per project)
-
-Set on the **/projects/new** form under "Advanced — clip settings" and
-stored as `projects.settings_json`:
-
-| Setting           | Default | Range         | Purpose                                  |
-|-------------------|---------|---------------|------------------------------------------|
-| `topN`            | 3       | 1–20          | How many highlights to keep              |
-| `minClipSeconds`  | 20      | 5–120         | Lower bound on clip duration             |
-| `maxClipSeconds`  | 60      | 10–180        | Upper bound on clip duration             |
-| `aspect`          | 9:16    | 9:16 \| 16:9 \| 1:1 | Output aspect ratio for Step 8       |
-| `vibe`            | ""      | free text     | Steers Gemini's selection ("funny", etc.)|
-
-### Install Step 7
-
-```powershell
-pnpm --filter worker run setup:analyze   # librosa, scenedetect, google-genai
-```
-
-Then in `.env`, set **`GEMINI_API_KEY`** to your key from
-[Google AI Studio](https://aistudio.google.com/apikey). The free tier is
-generous and Gemini 2.5 Flash is cheap; without a key the pipeline still
-works, it just uses local-only scoring.
-
-If you change the schema (already done for `settings_json` in Step 7) you
-must also run the migration:
-
-```powershell
-pnpm --filter web run db:generate   # generates lib/db/migrations/NNNN_*.sql
-pnpm --filter web run db:migrate    # applies pending migrations
-```
-
-### Verify Step 7
-
-```powershell
-# Handler registered + librosa/scenedetect/google-genai imports + API key check
-cd apps\worker
 .venv\Scripts\python scripts\smoke_analyze.py
+.venv\Scripts\python scripts\smoke_twelvelabs.py   # if TL enabled
+.venv\Scripts\python scripts\smoke_render.py
 ```
 
-End-to-end: create a new project. After ingest and transcribe finish,
-watch the **Analyze** job card climb to 100 %, then a **Highlight
-candidates** card appears showing the top-N clips with scores, titles,
-summaries, and per-signal breakdown chips.
-- [x] Step 7 — Highlight analysis (audio + chat + Gemini Flash)
-- [x] Step 8 — Clip rendering (FFmpeg, scene snapping, vertical reformat with blurred fill)
-- [x] Step 9 — Captions (ASS subtitle overlays; Remotion package available for future expansion)
-- [ ] Step 10 — Thumbnails (frame extraction + Satori) — _intentionally skipped for now_
-- [x] Step 11 — Live progress UI (Server-Sent Events)
-- [x] Step 12 — YouTube OAuth + scheduled uploads
-- [x] Step 13 — Instagram Reels publishing (replaces the planned TikTok step)
+---
 
-### Step 8 — What works today (clip rendering)
+## User-facing features (detail)
 
-The user clicks **Render clip** on any highlight; the worker enqueues a
-`render` job that:
+**Project settings** (`/projects/new` → Advanced): `topN`, min/max clip seconds, aspect (9:16 / 16:9 / 1:1), vibe text, analyze tier (`flash` | `pro`).
 
-1. **Scene-snaps** the start/end to the nearest content cut within ±1.5 s
-   using PySceneDetect — cleaner ins and outs than raw AI timestamps.
-2. **Cuts + reformats** with ffmpeg. For vertical output from a landscape
-   source we use the industry-standard *blurred-background fill*: a
-   scaled, boxblurred copy of the same frame sits behind the centered
-   original. No black bars.
-3. **Normalizes audio** with `loudnorm=I=-16:TP=-1.5:LRA=11` so a series
-   of clips don't jump in volume between cuts.
-4. **Extracts a dominant color** from the middle frame using Pillow's
-   k-means quantizer. Saved to `clips.dominant_color` and used in Step 9
-   to gradient captions toward a contrasting hue.
-5. Writes the final file to
-   `data/videos/<project>/clips/<clip_id>/clip.mp4` and updates the
-   `clips` row to `status = "ready"`.
+**Highlight signals:** transcript windows, audio peaks, chat density (when available), TwelveLabs visual segments, Gemini rerank with per-signal `reasonJson`.
 
-Default output sizes: **1080×1920 (9:16)**, 1080×1080 (1:1), 1920×1080
-(16:9). All clips are h.264 + AAC + faststart, ready for direct upload to
-any platform.
+**Render:** PySceneDetect snap ±1.5 s, blurred-background 9:16 letterbox, loudnorm, dominant-color for caption styling.
 
-### Step 9 — What works today (captions)
+**Captions:** Presets (highlight, popup, karaoke, minimal), fonts, auto-contrast colors from frame.
 
-The Render dialog has a **Burn captions immediately** toggle (on by default)
-and a full style picker:
+**Uploads:** Schedule YouTube + Instagram; default timezone `America/Chicago`; worker scheduler tick every 15 s.
 
-- **Style preset** (4 options):
-  - `highlight` — current word in primary color, full line in accent
-  - `popup`     — each word springs in with a tiny scale animation
-  - `karaoke`   — line stays on screen, sweeps through words (libass `\k`)
-  - `minimal`   — clean static block, no per-word animation
-- **Font** (6 options): Anton, Bebas Neue, Inter, Montserrat, Permanent
-  Marker, Roboto Mono.
-- **Auto-color** (default ON): caption gradient is derived from the clip's
-  dominant frame color — picks a high-contrast `(primary, accent)` pair
-  using a luminance heuristic. Disabling auto-color reveals two color
-  pickers for manual control.
-- **UPPERCASE** toggle.
+**Admin:** `/admin` — heal stuck jobs, delete failed projects, prune job history. `pnpm worker:reset` if port 8000 is wedged.
 
-Captions are baked into a sibling `clip-captioned.mp4` via ffmpeg's
-`subtitles` filter (libass). Rendering is ~2–5 s per clip on a typical
-laptop. The `packages/remotion/` package contains a parallel React-based
-implementation that can be swapped in for richer animations later — see
-its README for the swap point.
+---
 
-After a clip is rendered the **Rendered clips** card shows it with an
-inline `<video>` preview, **Restyle captions** / **Schedule upload** /
-**Download** / **Delete** actions, and a thumbnail of the dominant color.
+## Architecture
 
-### Step 11 — What works today (live progress / SSE)
-
-- `GET /api/projects/<id>/events` opens a Server-Sent Events stream.
-- The route polls the DB every 750 ms and ONLY pushes a new event when the
-  digest of the project snapshot changes (idle projects → near-zero
-  traffic).
-- Each `snapshot` event triggers `router.refresh()` on the client, so the
-  UI updates within ~1 second of any state change (job progress, clip
-  status, upload status) without a full reload.
-- Keepalive comments every 20 s keep proxies/Next dev server happy.
-- 15-minute cap on a single stream lifetime so abandoned tabs eventually
-  release the connection.
-
-### Step 12 + 13 — What works today (scheduled uploads)
-
-Each rendered clip has a **Schedule upload** dialog that lets the user:
-
-- Pick **one or both** of YouTube + Instagram (post to both simultaneously).
-- Choose **Post now** or **Schedule for** a wall-clock time + IANA
-  timezone. **Default timezone is `America/Chicago` (Central)** per spec.
-- Provide title, description (multi-line), tags (comma-separated).
-- Choose visibility: **Private** (default), Unlisted, Public.
-  - YouTube respects this; Instagram Reels are always public.
-
-Submitting writes a `scheduled_uploads` row. If the chosen time is "now"
-the publish job is enqueued immediately; otherwise the worker's
-**scheduler tick** (runs every 15 s as part of the job loop) picks up
-due rows and enqueues publish jobs at the right moment.
-
-The Python `publish` job:
-
-- Reads tokens from the `accounts` table (manage on `/accounts`).
-- For YouTube: refreshes the access token via OAuth2 if the API returns
-  401 and `YOUTUBE_CLIENT_ID` / `_SECRET` are set; otherwise raises
-  `AuthExpiredError` and the upload is marked failed (non-retryable) so
-  the user reconnects.
-- For Instagram: builds a public HTTPS URL from `NEXT_PUBLIC_APP_URL` +
-  `/api/media/<clip>` and runs the three-step Reels flow
-  (`POST /me/media` container → poll `status_code` until `FINISHED` →
-  `POST /me/media_publish`). The long-lived token (60 days) is
-  auto-refreshed on 401 via `/refresh_access_token`. Captions become the
-  IG caption with the user's tags appended as hashtags.
-- Uploads as **private by default** on platforms that support it.
-
-OAuth setup
------------
-Click **Connect with YouTube** or **Connect with Instagram** on
-`/accounts`. The full OAuth flows are wired end-to-end —
-`/api/auth/{youtube,instagram}/start` redirects to the provider,
-`/callback` exchanges the code for tokens, fetches a human-readable
-label (channel name / `@username`), and upserts the account row. See
-`.env.example` for the developer-console setup steps.
-
-For Instagram specifically: the account **must** be Business or Creator,
-must be added as a tester in the Meta app dashboard, and your
-`NEXT_PUBLIC_APP_URL` must be a public HTTPS URL (use a Cloudflared or
-ngrok tunnel for local dev) — Instagram fetches the video from that URL.
-
-### Worker tools (`/admin`, `pnpm worker:reset`)
-
-Visit `/admin` for a live worker-health dashboard with one-click cleanup
-buttons (heal stuck workers, cancel pending jobs, prune finished jobs,
-delete failed projects). When the worker itself is unresponsive, run
-`pnpm worker:reset` in a terminal — it kills any zombie uvicorn
-processes, frees port 8000, and resets stuck DB state.
-
-### Verify Step 8 + 9 + 11 + 12
-
-```powershell
-# Worker-side smoke checks (no model loading, no rendering).
-cd apps\worker
-.venv\Scripts\python scripts\smoke_render.py    # render + caption + publish
-
-# Web-side typecheck (no asChild errors expected).
-cd ..\..\apps\web
-npx tsc --noEmit
+```
+┌─────────────────────────┐         ┌──────────────────────────┐
+│  apps/web  (Next.js)    │ ──HTTP─▶│  apps/worker  (FastAPI)  │
+│  Drizzle → SQLite       │◀──SSE───│  Job runner (poll SQLite)│
+│  :3000                  │         │  :8000                   │
+└───────────┬─────────────┘         └────────────┬─────────────┘
+            │                                    │
+            └──────────── data/app.db ───────────┘
+                         data/videos/
 ```
 
-End-to-end: create a project, wait for it to reach **highlights ready**,
-click **Render clip** on any highlight (turn on captions, pick a style),
-wait for the **Rendered clips** card to show the preview, then click
-**Schedule upload** to either post now or queue for a future Central-time
-slot.
+Both processes share one SQLite file. Jobs are rows in `jobs`; the worker claims them atomically (`job_max_concurrent` default 1).
 
-## Cost estimate (per 5-hour VOD)
+---
 
-| Stage | Tool | Cost |
-|---|---|---|
-| Download | yt-dlp (local) | $0 |
-| Transcribe | faster-whisper on GPU (local) | $0 |
-| Highlight ranking | Gemini 2.5 Flash | ~$0.10 |
-| Clip render | FFmpeg (local) | $0 |
-| Captions | Remotion (local) | $0 |
-| Thumbnails | Frame extract + Satori (local) | $0 |
-| Upload | YouTube / Instagram APIs | $0 |
-| **Total** | | **~$0.10** |
+## Cost ballpark (5 h VOD, local GPU transcribe)
+
+| Stage | Cost |
+|-------|------|
+| Download, render, captions | $0 (local) |
+| Groq transcribe (optional) | ~$0.20 |
+| Gemini rerank | ~$0.05–0.15 |
+| TwelveLabs (if enabled) | Per TwelveLabs pricing |
+| **Typical without TL** | **~$0.10–0.30** |
+
+---
+
+## Build checklist (reference)
+
+- [x] Workspace, schema, worker job loop
+- [x] Ingest, transcribe, analyze, render, caption, publish
+- [x] TwelveLabs index + visual (v1.3, chunked upload)
+- [x] Gemini 3.x tiers, analysis dashboard, clip editor
+- [x] SSE live progress, project delete, OAuth uploads
+- [ ] Thumbnails (skipped)
+- [ ] Pegasus long-chunk async / timeout hardening
+- [ ] Marengo hit quality tuning

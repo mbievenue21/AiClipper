@@ -25,10 +25,11 @@ from worker.jobs.handlers import get_handler, registered_types  # noqa: E402
 def main() -> None:
     settings = get_settings()
     print(f"Registered job types: {', '.join(registered_types()) or '(none)'}")
-    if get_handler("analyze") is None:
-        print("FAIL: analyze handler not registered")
-        sys.exit(1)
-    print("OK analyze handler registered")
+    for required in ("analyze", "twelvelabs_index", "twelvelabs_analyze"):
+        if get_handler(required) is None:
+            print(f"FAIL: {required} handler not registered")
+            sys.exit(1)
+    print("OK analyze + TwelveLabs handlers registered")
 
     try:
         import librosa  # noqa: F401

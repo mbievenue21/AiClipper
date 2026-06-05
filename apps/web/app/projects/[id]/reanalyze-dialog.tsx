@@ -31,7 +31,7 @@ import { reanalyzeProjectAction } from "./actions";
  * Highlights that have already been rendered to clips are preserved (FK
  * cascade safety) — only the unrendered candidate highlights are wiped.
  */
-type ModelChoice = "" | "gemini-2.5-pro" | "gemini-2.5-flash";
+type ModelChoice = "" | "pro" | "flash";
 
 export function ReanalyzeDialog({
   projectId,
@@ -41,7 +41,7 @@ export function ReanalyzeDialog({
   disabledReason,
 }: {
   projectId: string;
-  savedModel: "gemini-2.5-pro" | "gemini-2.5-flash";
+  savedModel: "pro" | "flash";
   savedVibe?: string;
   disabled?: boolean;
   disabledReason?: string;
@@ -138,26 +138,26 @@ export function ReanalyzeDialog({
             </p>
             <div className="grid grid-cols-2 gap-2">
               <ModelCard
-                id="gemini-2.5-pro"
+                id="pro"
                 title="Pro"
-                subtitle="Best narrative reasoning"
-                tagline="~$0.03–0.05 per pass"
+                subtitle="Gemini 3.1 Pro"
+                tagline="Deepest reasoning"
                 icon={Sparkles}
                 accent="violet"
-                selected={effectiveChoice === "gemini-2.5-pro"}
-                isSaved={savedModel === "gemini-2.5-pro" && choice === ""}
-                onClick={() => setChoice("gemini-2.5-pro")}
+                selected={effectiveChoice === "pro"}
+                isSaved={savedModel === "pro" && choice === ""}
+                onClick={() => setChoice("pro")}
               />
               <ModelCard
-                id="gemini-2.5-flash"
+                id="flash"
                 title="Flash"
-                subtitle="Free tier, faster"
-                tagline="$0, blunter judgement"
+                subtitle="Gemini 3.5 Flash"
+                tagline="Frontier, fast + cheap"
                 icon={Zap}
                 accent="amber"
-                selected={effectiveChoice === "gemini-2.5-flash"}
-                isSaved={savedModel === "gemini-2.5-flash" && choice === ""}
-                onClick={() => setChoice("gemini-2.5-flash")}
+                selected={effectiveChoice === "flash"}
+                isSaved={savedModel === "flash" && choice === ""}
+                onClick={() => setChoice("flash")}
               />
             </div>
 

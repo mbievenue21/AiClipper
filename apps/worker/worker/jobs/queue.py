@@ -181,6 +181,19 @@ def enqueue_due_uploads() -> list[str]:
 
 
 def update_progress(job_id: str, progress: float, message: str | None = None) -> None:
+    """Persist progress AND check for cancellation in one DB round-trip.
+
+    Long-running handlers call this from inside their loops; if the job row
+    has been cancelled or deleted (e.g. project wiped from the UI) or the
+    worker is shutting down, this raises :class:`JobCancelled` so the
+    handler can unwind cooperatively instead of hammering external APIs.
+    """
+    # Local import to avoid a circular import (cancellation imports from
+    # this module's neighbour `..db`/`..models` which are fine, but
+    # cancellation also wants to call check_cancelled() here).
+    from .cancellation import check_cancelled
+
+    check_cancelled(job_id)
     with session_scope() as session:
         session.execute(
             update(Job)
@@ -202,6 +215,18 @@ def mark_succeeded(job_id: str, result: dict[str, Any] | None = None) -> None:
                 finished_at=_now_ms(),
             )
         )
+
+
+def mark_cancelled(job_id: str, reason: str = "cancelled") -> None:
+    """Terminal-state cancel. Used when a handler raises JobCancelled (project
+    deleted, worker shutting down, etc.) — never retries."""
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        if job is None:
+            return
+        job.status = "cancelled"
+        job.progress_message = reason[:200]
+        job.finished_at = _now_ms()
 
 
 def mark_failed(job_id: str, error: str, *, retryable: bool = True) -> None:

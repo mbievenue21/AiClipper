@@ -2,11 +2,13 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   CalendarClock,
   CaptionsIcon,
   Download,
   Loader2,
+  Pencil,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -45,6 +47,15 @@ import {
 import { ScheduleUploadDialog, type AccountOption } from "./schedule-upload-dialog";
 import type { GeneratedUploadMetadata } from "@/lib/db/schema";
 
+export type ClipVersionData = {
+  id: string;
+  createdAt: number;
+  durationSeconds: number | null;
+  hasCaptions: boolean;
+  isActive: boolean;
+  versionLabel: string | null;
+};
+
 export type ClipCardData = {
   id: string;
   highlightId: string;
@@ -59,6 +70,9 @@ export type ClipCardData = {
   errorMessage: string | null;
   captionStyle: CaptionStyleState | null;
   generatedMetadata: GeneratedUploadMetadata | null;
+  createdAt: number;
+  versionLabel: string | null;
+  versions: ClipVersionData[];
   // Latest render/caption job (for progress while in-flight).
   activeJob: {
     type: string;
@@ -107,9 +121,15 @@ export function ClipCard({
             <CardTitle className="truncate text-base">{clip.title}</CardTitle>
             <CardDescription className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs">
               <Badge variant="outline">{clip.aspect}</Badge>
+              {clip.versionLabel && (
+                <Badge variant="secondary">{clip.versionLabel}</Badge>
+              )}
               {clip.durationSeconds != null && (
                 <span>{clip.durationSeconds.toFixed(1)}s</span>
               )}
+              <span className="text-muted-foreground">
+                {new Date(clip.createdAt).toLocaleString()}
+              </span>
               {clip.dominantColor && (
                 <span className="flex items-center gap-1">
                   <span
@@ -132,7 +152,9 @@ export function ClipCard({
             <p className="text-xs text-muted-foreground">
               {clip.activeJob.type === "caption"
                 ? "Burning captions…"
-                : "Rendering…"}
+                : clip.activeJob.type === "reedit"
+                  ? "Saving edits…"
+                  : "Rendering…"}
               {clip.activeJob.progressMessage
                 ? ` — ${clip.activeJob.progressMessage}`
                 : null}
@@ -172,11 +194,38 @@ export function ClipCard({
         {clip.uploads.length > 0 && (
           <UploadList projectId={projectId} uploads={clip.uploads} />
         )}
+
+        {clip.versions.length > 1 && (
+          <div className="rounded-md border bg-muted/30 p-2 text-xs">
+            <p className="mb-1 font-medium text-muted-foreground">Versions</p>
+            <ul className="space-y-0.5">
+              {clip.versions.map((v) => (
+                <li key={v.id} className="flex justify-between gap-2">
+                  <span>
+                    {new Date(v.createdAt).toLocaleString()}
+                    {v.versionLabel ? ` — ${v.versionLabel}` : ""}
+                    {v.isActive ? " (active)" : ""}
+                  </span>
+                  <span className="text-muted-foreground">
+                    {v.durationSeconds?.toFixed(0) ?? "?"}s
+                    {v.hasCaptions ? " · captioned" : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </CardContent>
 
       <CardFooter className="flex flex-wrap gap-2 pt-0">
         {clip.status === "ready" && (
           <>
+            <Button asChild size="sm" variant="default">
+              <Link href={`/projects/${projectId}/clips/${clip.id}/edit`}>
+                <Pencil className="size-3.5" />
+                Edit clip
+              </Link>
+            </Button>
             <CaptionStyleDialog
               projectId={projectId}
               clipId={clip.id}

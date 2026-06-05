@@ -19,15 +19,26 @@ import structlog
 
 from ..config import get_settings
 from ..logging import get_logger
-from . import handlers, queue
+from . import cancellation, handlers, queue
 
 log = get_logger(__name__)
+
+# How long we wait for in-flight handler tasks to honor cooperative cancellation
+# before letting the asyncio loop close out from under them. Tuned to be long
+# enough for a TwelveLabs PUT round-trip but short enough that Ctrl+C feels
+# responsive.
+_GRACEFUL_SHUTDOWN_SECONDS = 12.0
 
 
 class JobRunner:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
+        # Track every in-flight handler task so stop() can cancel them all
+        # and wait briefly for them to bail. Otherwise long synchronous loops
+        # inside asyncio.to_thread keep spamming external APIs after uvicorn
+        # has already logged "Application shutdown complete".
+        self._inflight: set[asyncio.Task] = set()
         settings = get_settings()
         self._sem = asyncio.Semaphore(settings.job_max_concurrent)
         self._poll = settings.job_poll_interval_seconds
@@ -56,6 +67,9 @@ class JobRunner:
         except Exception:
             log.exception("heal_orphan_projects_failed")
         self._stop_event.clear()
+        # Publish the shutdown signal to the cancellation module so any
+        # checkpoint inside a long-running handler can react to Ctrl+C.
+        cancellation.set_shutdown_event(self._stop_event)
         self._task = asyncio.create_task(self._loop(), name="job-runner")
         log.info(
             "job_runner_started",
@@ -66,11 +80,35 @@ class JobRunner:
     async def stop(self) -> None:
         if self._task is None:
             return
+        # 1) Tell everyone (poll loop + in-flight handlers) we're shutting down.
         self._stop_event.set()
+        # 2) Cancel the polling task so it doesn't claim a fresh job mid-shutdown.
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+        # 3) Cooperatively wait for in-flight handlers to notice the stop
+        # signal (via update_progress -> check_cancelled) and unwind. We
+        # also cancel them so any awaits get an asyncio.CancelledError; the
+        # synchronous thread bodies (TwelveLabs uploads, ffmpeg, yt-dlp)
+        # will exit at their next cancellation checkpoint.
+        if self._inflight:
+            log.info("job_runner_draining", inflight=len(self._inflight))
+            for t in list(self._inflight):
+                t.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._inflight, return_exceptions=True),
+                    timeout=_GRACEFUL_SHUTDOWN_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                # Threads inside asyncio.to_thread can't be force-killed; we
+                # log and let uvicorn proceed. The OS reaps them on exit.
+                log.warning(
+                    "job_runner_drain_timeout",
+                    still_running=len(self._inflight),
+                    seconds=_GRACEFUL_SHUTDOWN_SECONDS,
+                )
         log.info("job_runner_stopped")
 
     async def _loop(self) -> None:
@@ -101,7 +139,11 @@ class JobRunner:
                 await asyncio.sleep(self._poll)
                 continue
 
-            asyncio.create_task(self._run_one(job.id, job.type))
+            task = asyncio.create_task(
+                self._run_one(job.id, job.type), name=f"job:{job.id}"
+            )
+            self._inflight.add(task)
+            task.add_done_callback(self._inflight.discard)
 
     async def _run_one(self, job_id: str, job_type: str) -> None:
         async with self._sem:
@@ -118,6 +160,10 @@ class JobRunner:
                 return
 
             def report(progress: float, message: str | None = None) -> None:
+                # update_progress also raises JobCancelled if the job row was
+                # cancelled / deleted / the worker is shutting down. This is
+                # how long-running handlers (TwelveLabs upload, yt-dlp,
+                # ffmpeg) discover they should bail.
                 queue.update_progress(job_id, progress, message)
 
             structlog.contextvars.bind_contextvars(job_id=job_id, job_type=job_type)
@@ -137,6 +183,16 @@ class JobRunner:
                 result = await handler(job_obj, report)
                 queue.mark_succeeded(job_id, result)
                 bound_log.info("job_succeeded")
+            except cancellation.JobCancelled as exc:
+                # Graceful, expected unwind — don't retry, don't log a stack.
+                bound_log.info("job_cancelled", reason=str(exc))
+                queue.mark_cancelled(job_id, str(exc))
+            except asyncio.CancelledError:
+                # The runner cancelled us during shutdown. Same handling as
+                # JobCancelled — don't mark failed (would retry forever).
+                bound_log.info("job_cancelled", reason="asyncio cancel (shutdown)")
+                queue.mark_cancelled(job_id, "worker shutdown")
+                raise
             except Exception as exc:
                 bound_log.exception("job_failed")
                 queue.mark_failed(job_id, f"{exc}\n{traceback.format_exc()}")

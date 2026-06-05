@@ -9,12 +9,12 @@ import { useRouter } from "next/navigation";
  * the old polling-based RefreshWhenRunning.
  *
  * Strategy:
- * - One EventSource per page lifecycle.
+ * - One EventSource per page lifecycle, with automatic reconnect when the
+ *   server rotates the stream (max lifetime) or the connection drops.
  * - On every `snapshot` event we trigger a server refresh; React's diffing
  *   keeps the UI flicker-free.
- * - If the browser drops the connection we let EventSource auto-reconnect.
- * - We also DOUBLE-refresh when transitioning from active -> idle to make
- *   sure the final "succeeded" state is captured.
+ * - When the pipeline was active and goes idle, we double-refresh so the
+ *   final "ready" state is captured even if the last SSE tick was missed.
  */
 export function ProjectLiveProgress({
   projectId,
@@ -29,15 +29,10 @@ export function ProjectLiveProgress({
   useEffect(() => {
     const url = `/api/projects/${encodeURIComponent(projectId)}/events`;
     let source: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
     let lastRefresh = 0;
     const REFRESH_DEBOUNCE_MS = 300;
-
-    try {
-      source = new EventSource(url);
-    } catch {
-      // SSE not supported — let RAF/route revalidation fall back below.
-      return;
-    }
 
     const refreshSoon = () => {
       const now = Date.now();
@@ -46,15 +41,49 @@ export function ProjectLiveProgress({
       router.refresh();
     };
 
-    source.addEventListener("snapshot", () => {
-      refreshSoon();
-    });
-    source.addEventListener("error", () => {
-      // Auto-reconnect is built-in; nothing to do unless we get a final close.
-    });
-    source.addEventListener("close", () => {
-      source?.close();
-    });
+    const connect = () => {
+      if (disposed) return;
+      try {
+        source = new EventSource(url);
+      } catch {
+        return;
+      }
+
+      source.addEventListener("snapshot", () => {
+        refreshSoon();
+      });
+
+      // Server sends `close` when rotating the stream (max lifetime). Refresh
+      // once so we don't freeze on a stale "indexing" frame, then reconnect.
+      source.addEventListener("close", () => {
+        refreshSoon();
+        source?.close();
+        source = null;
+        if (!disposed) {
+          reconnectTimer = setTimeout(connect, 500);
+        }
+      });
+
+      source.addEventListener("error", () => {
+        // EventSource auto-reconnects on transient errors; refresh on reopen
+        // is handled by the next snapshot. If readyState is CLOSED, reconnect.
+        if (source?.readyState === EventSource.CLOSED && !disposed) {
+          reconnectTimer = setTimeout(connect, 1000);
+        }
+      });
+    };
+
+    connect();
+
+    // Belt-and-suspenders: long pipelines (TL multipart upload) can outlive a
+    // single SSE rotation. Poll every 30s while active so the UI never freezes
+    // on a stale "indexing" frame if the event stream glitches.
+    const poll =
+      active
+        ? setInterval(() => {
+            router.refresh();
+          }, 30_000)
+        : null;
 
     // Final-state fallback: when we transition from active -> idle, schedule
     // one extra refresh in case the SSE event landed mid-render.
@@ -65,6 +94,9 @@ export function ProjectLiveProgress({
     if (active) wasActive.current = true;
 
     return () => {
+      disposed = true;
+      if (poll) clearInterval(poll);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       source?.close();
     };
   }, [projectId, active, router]);

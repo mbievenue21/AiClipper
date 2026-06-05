@@ -23,7 +23,10 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const POLL_INTERVAL_MS = 750;
-const MAX_LIFETIME_MS = 15 * 60 * 1000;
+// Long VODs (ingest + TL multipart upload + analyze) can exceed 15 minutes.
+// Keep the stream open long enough for a full first-run pipeline; the client
+// reconnects automatically when we send `close` so abandoned tabs still die.
+const MAX_LIFETIME_MS = 2 * 60 * 60 * 1000;
 
 type Snapshot = {
   project: {

@@ -27,6 +27,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { db, schema } from "@/lib/db/client";
 import { fetchWorkerStats, pingWorker } from "@/lib/worker";
+import { getTwelveLabsConfigStatus } from "@/lib/twelvelabs/status";
 
 import { AdminActionsPanel } from "./admin-actions-panel";
 
@@ -125,6 +126,45 @@ export default async function AdminPage() {
     (s, r) => s + Number(r.count),
     0,
   );
+
+  const tlConfig = getTwelveLabsConfigStatus();
+
+  const tlIndexByStatus = db
+    .select({
+      status: schema.externalVideoIndexes.status,
+      count: sql<number>`COUNT(*)`,
+    })
+    .from(schema.externalVideoIndexes)
+    .groupBy(schema.externalVideoIndexes.status)
+    .all();
+
+  const visualSegmentTotal = db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(schema.visualSegments)
+    .all()[0]?.count ?? 0;
+
+  const failedTlJobs = db
+    .select({
+      id: schema.jobs.id,
+      type: schema.jobs.type,
+      errorMessage: schema.jobs.errorMessage,
+      createdAt: schema.jobs.createdAt,
+    })
+    .from(schema.jobs)
+    .where(
+      sql`${schema.jobs.status} = 'failed' AND ${schema.jobs.type} IN ('twelvelabs_index','twelvelabs_analyze')`,
+    )
+    .orderBy(desc(schema.jobs.createdAt))
+    .limit(5)
+    .all();
+
+  const recentTlJobs = recentJobs.filter((j) =>
+    j.type === "twelvelabs_index" || j.type === "twelvelabs_analyze",
+  );
+
+  const healthBody = health.body as
+    | { twelvelabs?: Record<string, unknown> }
+    | undefined;
 
   return (
     <div className="container mx-auto max-w-6xl space-y-6 px-4 py-10">
@@ -247,6 +287,106 @@ export default async function AdminPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">TwelveLabs video analysis</CardTitle>
+          <CardDescription className="text-xs">
+            Global config and index health. Per-project visual segments and job
+            logs live on each project page.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 text-xs">
+          <div className="flex flex-wrap gap-1.5">
+            <Badge variant={tlConfig.enabled ? "default" : "secondary"}>
+              {tlConfig.enabled ? "enabled" : "disabled"}
+            </Badge>
+            {tlConfig.enabled && (
+              <>
+                <Badge
+                  variant={tlConfig.apiKeyConfigured ? "outline" : "destructive"}
+                >
+                  API key {tlConfig.apiKeyConfigured ? "ok" : "missing"}
+                </Badge>
+                <Badge
+                  variant={tlConfig.indexIdConfigured ? "outline" : "destructive"}
+                >
+                  index id {tlConfig.indexIdConfigured ? "ok" : "missing"}
+                </Badge>
+                <Badge variant="outline">
+                  fail-open {tlConfig.failOpen ? "on" : "off"}
+                </Badge>
+              </>
+            )}
+            {tlConfig.multimodalEnabled && (
+              <Badge variant="outline">gemini multimodal</Badge>
+            )}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <div className="rounded-md border bg-muted/30 p-2">
+              <p className="text-muted-foreground">Visual segments (all)</p>
+              <p className="text-lg font-semibold">{Number(visualSegmentTotal)}</p>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-2">
+              <p className="text-muted-foreground">Index rows</p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {tlIndexByStatus.length === 0 ? (
+                  <span className="text-muted-foreground">none</span>
+                ) : (
+                  tlIndexByStatus.map((r) => (
+                    <Badge key={r.status} variant="secondary">
+                      {r.status}: {Number(r.count)}
+                    </Badge>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-2">
+              <p className="text-muted-foreground">Worker /health</p>
+              <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                {healthBody?.twelvelabs
+                  ? JSON.stringify(healthBody.twelvelabs)
+                  : health.ok
+                    ? "no twelvelabs block (restart worker)"
+                    : "worker offline"}
+              </p>
+            </div>
+          </div>
+          {failedTlJobs.length > 0 && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/5 p-2">
+              <p className="font-medium text-destructive">Recent TwelveLabs failures</p>
+              <ul className="mt-1 space-y-1 text-destructive/90">
+                {failedTlJobs.map((j) => (
+                  <li key={j.id}>
+                    {j.type} · {formatDistanceToNow(j.createdAt, { addSuffix: true })}
+                    {j.errorMessage ? ` — ${j.errorMessage.slice(0, 100)}` : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {recentTlJobs.length > 0 && (
+            <div>
+              <p className="mb-1 font-medium text-muted-foreground">
+                Recent TwelveLabs jobs
+              </p>
+              <ul className="space-y-1">
+                {recentTlJobs.slice(0, 5).map((j) => (
+                  <li key={j.id} className="flex justify-between gap-2">
+                    <span className="font-mono">{j.type}</span>
+                    <Badge variant={jobStatusVariants[j.status] ?? "secondary"}>
+                      {j.status}
+                    </Badge>
+                    <span className="truncate text-muted-foreground">
+                      {j.progressMessage ?? ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
         <AdminActionsPanel />

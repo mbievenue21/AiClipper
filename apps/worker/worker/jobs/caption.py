@@ -9,6 +9,7 @@ Output: a sibling ``clip-captioned.mp4`` next to the input, plus the
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from ..config import get_settings
 from ..db import session_scope
 from ..media.paths import rel_path
 from ..models import Clip, Highlight, Transcript, TranscriptSegment, Video
-from ..render.captions import chunk_segments, write_ass_file
+from ..render.captions import chunk_segments, segments_from_overrides, write_ass_file
 from ..render.ffmpeg import burn_subtitles
 from .handlers import ProgressReporter, register
 
@@ -48,6 +49,7 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
 
     # Phase 1: gather inputs.
     progress(0.05, "loading clip + transcript")
+    stored_override: list[dict[str, Any]] | None = None
     with session_scope() as session:
         clip = session.get(Clip, clip_id)
         if clip is None:
@@ -108,6 +110,13 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
         clip.caption_style = merged_style
         clip.updated_at = _now_ms()
 
+        stored_override = None
+        if clip.caption_segments_json:
+            try:
+                stored_override = json.loads(clip.caption_segments_json)
+            except json.JSONDecodeError:
+                stored_override = None
+
     clip_input_abs = _media_abs(clip_input_path_rel)
     if not clip_input_abs.exists():
         raise FileNotFoundError(f"Clip file missing: {clip_input_abs}")
@@ -127,12 +136,18 @@ async def handle_caption(job, progress: ProgressReporter) -> dict[str, Any]:
     # Propagate to build_ass so font-size auto-sizing uses the same number.
     merged_style = {**merged_style, "maxCharsPerLine": chars_per_line}
 
-    segments = chunk_segments(
-        raw_segments,
-        clip_start=h_start,
-        clip_end=h_end,
-        max_chars_per_line=chars_per_line,
-    )
+    override_payload = payload.get("caption_segments")
+    if override_payload:
+        segments = segments_from_overrides(override_payload)
+    elif stored_override:
+        segments = segments_from_overrides(stored_override)
+    else:
+        segments = chunk_segments(
+            raw_segments,
+            clip_start=h_start,
+            clip_end=h_end,
+            max_chars_per_line=chars_per_line,
+        )
 
     if not segments:
         log.warning("caption_no_segments_in_range", clip_id=clip_id)

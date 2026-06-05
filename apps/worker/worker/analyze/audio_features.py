@@ -38,6 +38,17 @@ class AudioFeatureSeries:
         slice_ = [s["excitement"] for s in self.samples[i:j]]
         return float(sum(slice_) / len(slice_)) if slice_ else 0.0
 
+    def peak_at_in_window(self, start: float, end: float) -> float | None:
+        """Return the timestamp (seconds) of max excitement inside [start, end]."""
+        if end <= start or not self.samples:
+            return None
+        i = max(0, int(round(start)))
+        j = min(len(self.samples), int(round(end)) + 1)
+        if j <= i:
+            return None
+        best_idx = max(range(i, j), key=lambda k: self.samples[k]["excitement"])
+        return float(self.samples[best_idx]["t"])
+
 
 def compute_audio_features(audio_path: Path) -> AudioFeatureSeries:
     """Return one sample per second of audio.

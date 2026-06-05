@@ -57,7 +57,7 @@ function parseSettings(formData: FormData): ProjectSettings {
   );
 
   const analyzeModel: ProjectSettings["analyzeModel"] = (
-    ["gemini-2.5-pro", "gemini-2.5-flash"] as const
+    ["pro", "flash"] as const
   ).includes(raw.analyzeModel as ProjectSettings["analyzeModel"])
     ? (raw.analyzeModel as ProjectSettings["analyzeModel"])
     : DEFAULT_PROJECT_SETTINGS.analyzeModel;

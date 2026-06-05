@@ -49,6 +49,14 @@ def health() -> dict:
         "render": _check_module("mediapipe") is not None,
     }
 
+    tl = {
+        "enabled": settings.twelvelabs_enabled,
+        "api_key_configured": bool(settings.twelvelabs_api_key),
+        "index_id_configured": bool(settings.twelvelabs_index_id),
+        "fail_open": settings.twelvelabs_fail_open,
+        "multimodal_refine": settings.gemini_multimodal_enabled,
+    }
+
     return {
         "status": "ok" if db_ok else "degraded",
         "python_version": sys.version.split(" ", 1)[0],
@@ -61,4 +69,5 @@ def health() -> dict:
         "media_root": str(settings.media_root_path),
         "registered_handlers": handlers.registered_types(),
         "capabilities": capabilities,
+        "twelvelabs": tl,
     }

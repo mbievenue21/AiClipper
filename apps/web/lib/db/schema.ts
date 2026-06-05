@@ -50,7 +50,23 @@ const updatedAt = () =>
 // created (number of clips, length range, aspect ratio, vibe hint). Every
 // downstream stage (analyze, render, publish) reads from this one place.
 // ============================================================================
-export type AnalyzeModel = "gemini-2.5-pro" | "gemini-2.5-flash";
+// Logical Gemini tiers. The worker resolves these to concrete model IDs from
+// its env (defaults: pro -> gemini-3.1-pro-preview, flash -> gemini-3.5-flash).
+// See https://ai.google.dev/gemini-api/docs/models
+export type AnalyzeModel = "pro" | "flash";
+
+/** Human-facing label for a Gemini tier (kept in sync with worker defaults). */
+export const ANALYZE_MODEL_LABELS: Record<AnalyzeModel, string> = {
+  pro: "Gemini 3.1 Pro",
+  flash: "Gemini 3.5 Flash",
+};
+
+/** Normalize legacy/explicit model strings (e.g. "gemini-2.5-pro") to a tier. */
+export function normalizeAnalyzeModel(value: unknown): AnalyzeModel {
+  const s = String(value ?? "").toLowerCase();
+  if (s === "pro" || s.includes("pro")) return "pro";
+  return "flash";
+}
 
 export type ProjectSettings = {
   topN: number; // 1..20 — how many highlights to keep
@@ -73,12 +89,12 @@ export type ProjectSettings = {
   tailPaddingSeconds: number; // default 2
 
   /**
-   * Which Gemini model to use for highlight rerank.
-   * - "gemini-2.5-pro" (default): ~$0.03–0.05 per analysis but much better
-   *   at narrative-arc reasoning; can adjust start/end to capture buildup.
-   * - "gemini-2.5-flash": free tier; faster but blunter judgement.
+   * Which Gemini tier to use for highlight rerank (resolved to a concrete
+   * model ID by the worker, tracking the newest Gemini 3.x releases).
+   * - "flash" (default): Gemini 3.5 Flash — frontier reasoning, fast + cheap.
+   * - "pro": Gemini 3.1 Pro — deepest narrative-arc reasoning for boundaries.
    */
-  analyzeModel: AnalyzeModel; // default "gemini-2.5-pro"
+  analyzeModel: AnalyzeModel; // default "flash"
 };
 
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
@@ -89,7 +105,7 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   vibe: "",
   preRollSeconds: 8,
   tailPaddingSeconds: 2,
-  analyzeModel: "gemini-2.5-pro",
+  analyzeModel: "flash",
 };
 
 export const projects = sqliteTable("projects", {
@@ -141,6 +157,8 @@ export const videos = sqliteTable(
     audioPath: text("audio_path"),
     // Raw chat replay JSON path (Twitch/YouTube live). Null for uploads.
     chatJsonPath: text("chat_json_path"),
+    // Scene cut timestamps (seconds) from PySceneDetect, JSON array of floats.
+    sceneCutsJson: text("scene_cuts_json", { mode: "json" }).$type<number[]>(),
     createdAt: createdAt(),
   },
   (t) => [index("videos_project_idx").on(t.projectId)],
@@ -245,6 +263,25 @@ export const audioFeatures = sqliteTable("audio_features", {
   createdAt: createdAt(),
 });
 
+// Per-second chat density series (mirrors audio_features pattern).
+export type ChatDensityData = {
+  rawPerSecond: number[];
+  normalised: number[];
+  totalMessages: number;
+};
+
+export const chatFeatures = sqliteTable("chat_features", {
+  id: id(),
+  videoId: text("video_id")
+    .notNull()
+    .references(() => videos.id, { onDelete: "cascade" })
+    .unique(),
+  densityJson: text("density_json", { mode: "json" })
+    .$type<ChatDensityData>()
+    .notNull(),
+  createdAt: createdAt(),
+});
+
 // ============================================================================
 // HIGHLIGHTS
 // Candidate clip ranges produced by the analysis step. A highlight is
@@ -252,12 +289,62 @@ export const audioFeatures = sqliteTable("audio_features", {
 // `reasonJson` captures which signals contributed (chat / audio / LLM)
 // so we can show *why* the AI picked this moment.
 // ============================================================================
+export type HighlightEvidenceScores = {
+  local?: number;
+  transcript?: number;
+  audio?: number;
+  chat?: number;
+  scene?: number;
+  visual?: number;
+  providerAgreement?: number;
+  fusion?: number;
+};
+
+export type HighlightTwelveLabsEvidence = {
+  used: boolean;
+  providerVideoId?: string | null;
+  sourceMethod?: string | null;
+  segmentType?: string | null;
+  confidence?: number | null;
+  description?: string | null;
+  visualReason?: string | null;
+  audioReason?: string | null;
+  speechReason?: string | null;
+};
+
 export type HighlightReason = {
   chatScore: number;
   audioScore: number;
   llmScore: number;
   llmExplanation: string;
   signals: string[]; // e.g. ["chat_spike", "laughter", "key_phrase"]
+  momentType?: string | null;
+  confidence?: number | null;
+  /** Extended evidence when TwelveLabs multimodal analysis ran. */
+  visualScore?: number | null;
+  fusionScore?: number | null;
+  seedSource?: string | null;
+  scores?: HighlightEvidenceScores;
+  twelvelabs?: HighlightTwelveLabsEvidence | null;
+  penalties?: {
+    commentaryHeavy?: number;
+    deadAir?: number;
+    offCenterPeak?: number;
+  };
+  boundaryDecision?: {
+    originalStart: number;
+    originalEnd: number;
+    finalStart: number;
+    finalEnd: number;
+    reason?: string;
+  };
+};
+
+/** Segment-level caption override for clip editor / reedit job. */
+export type CaptionSegmentOverride = {
+  start: number; // seconds, clip-relative
+  end: number;
+  text: string;
 };
 
 /**
@@ -380,6 +467,16 @@ export const clips = sqliteTable(
     captionStyleJson: text("caption_style_json", {
       mode: "json",
     }).$type<ClipCaptionSettings>(),
+    // Clip editor: trim offsets relative to highlight bounds on source video.
+    trimStartSeconds: real("trim_start_seconds"),
+    trimEndSeconds: real("trim_end_seconds"),
+    captionSegmentsJson: text("caption_segments_json", {
+      mode: "json",
+    }).$type<CaptionSegmentOverride[]>(),
+    parentClipId: text("parent_clip_id"),
+    versionLabel: text("version_label"),
+    isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+    supersededAt: integer("superseded_at", { mode: "timestamp_ms" }),
     errorMessage: text("error_message"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -479,9 +576,12 @@ export const DEFAULT_TIMEZONE = "America/Chicago"; // Central Standard Time
 export type JobType =
   | "ingest"
   | "transcribe"
+  | "twelvelabs_index"
+  | "twelvelabs_analyze"
   | "analyze"
   | "render"
   | "caption"
+  | "reedit"
   | "publish";
 
 export type JobStatus =
@@ -520,6 +620,138 @@ export const jobs = sqliteTable(
   (t) => [
     index("jobs_status_created_idx").on(t.status, t.createdAt),
     index("jobs_project_idx").on(t.projectId),
+  ],
+);
+
+// ============================================================================
+// TWELVELABS MULTIMODAL ANALYSIS
+// External video index state, visual segments, and pre-fusion candidates.
+// ============================================================================
+export const externalVideoIndexes = sqliteTable(
+  "external_video_indexes",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    videoId: text("video_id")
+      .notNull()
+      .references(() => videos.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    providerIndexId: text("provider_index_id"),
+    providerVideoId: text("provider_video_id"),
+    providerTaskId: text("provider_task_id"),
+    status: text("status").notNull().default("pending"),
+    sourcePath: text("source_path"),
+    sourceSha256: text("source_sha256"),
+    durationSeconds: real("duration_seconds"),
+    chunkIndex: integer("chunk_index").notNull().default(0),
+    chunkStartSeconds: real("chunk_start_seconds").default(0),
+    chunkEndSeconds: real("chunk_end_seconds"),
+    metadataJson: text("metadata_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    errorMessage: text("error_message"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("idx_external_video_indexes_project_provider").on(
+      t.projectId,
+      t.provider,
+    ),
+  ],
+);
+
+export const visualSegments = sqliteTable(
+  "visual_segments",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    videoId: text("video_id")
+      .notNull()
+      .references(() => videos.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    model: text("model"),
+    sourceMethod: text("source_method").notNull(),
+    startSeconds: real("start_seconds").notNull(),
+    endSeconds: real("end_seconds").notNull(),
+    segmentType: text("segment_type"),
+    confidence: real("confidence"),
+    title: text("title"),
+    description: text("description"),
+    visualReason: text("visual_reason"),
+    audioReason: text("audio_reason"),
+    speechReason: text("speech_reason"),
+    chatReason: text("chat_reason"),
+    rawJson: text("raw_json", { mode: "json" }).$type<Record<string, unknown>>(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("idx_visual_segments_project_time").on(
+      t.projectId,
+      t.startSeconds,
+      t.endSeconds,
+    ),
+    index("idx_visual_segments_project_type").on(t.projectId, t.segmentType),
+  ],
+);
+
+export const highlightCandidates = sqliteTable(
+  "highlight_candidates",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    videoId: text("video_id")
+      .notNull()
+      .references(() => videos.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    startSeconds: real("start_seconds").notNull(),
+    endSeconds: real("end_seconds").notNull(),
+    seedSource: text("seed_source"),
+    momentType: text("moment_type"),
+    confidence: real("confidence"),
+    score: real("score").notNull().default(0),
+    localScore: real("local_score"),
+    transcriptScore: real("transcript_score"),
+    audioScore: real("audio_score"),
+    chatScore: real("chat_score"),
+    sceneScore: real("scene_score"),
+    visualScore: real("visual_score"),
+    multimodalScore: real("multimodal_score"),
+    fusionScore: real("fusion_score"),
+    audioPeakAt: real("audio_peak_at"),
+    chatPeakAt: real("chat_peak_at"),
+    visualPeakAt: real("visual_peak_at"),
+    title: text("title"),
+    summary: text("summary"),
+    reasonJson: text("reason_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    rawProviderJson: text("raw_provider_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    selectedForRerank: integer("selected_for_rerank", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    selectedAsHighlight: integer("selected_as_highlight", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index("idx_highlight_candidates_project_score").on(t.projectId, t.score),
+    index("idx_highlight_candidates_project_time").on(
+      t.projectId,
+      t.startSeconds,
+      t.endSeconds,
+    ),
   ],
 );
 

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { formatDistanceToNow } from "date-fns";
 import { ArrowLeft, FileText, FileVideo, Film, Sparkles } from "lucide-react";
 
@@ -17,6 +17,7 @@ import { db, schema } from "@/lib/db/client";
 import {
   DEFAULT_CAPTION_SETTINGS,
   DEFAULT_PROJECT_SETTINGS,
+  normalizeAnalyzeModel,
   type ClipCaptionSettings,
   type GeneratedUploadMetadata,
   type HighlightReason,
@@ -29,7 +30,12 @@ import { ProjectLiveProgress } from "./project-live-progress";
 import { ProjectPipelinePanel } from "./project-pipeline-panel";
 import type { AccountOption } from "./schedule-upload-dialog";
 import { TranscriptUploadDialog } from "./transcript-upload-dialog";
+import { AnalysisBadges } from "./analysis-badges";
+import { ProjectAnalysisDashboard } from "./analysis-dashboard";
+import { HighlightEvidenceDetails } from "./highlight-evidence";
+import { getTwelveLabsConfigStatus } from "@/lib/twelvelabs/status";
 import { ReanalyzeDialog } from "./reanalyze-dialog";
+import { DeleteProjectDialog } from "./delete-project-dialog";
 
 export const dynamic = "force-dynamic";
 
@@ -169,9 +175,14 @@ export default async function ProjectPage({ params }: PageProps) {
   >();
   for (const j of jobs) {
     if (j.status !== "running" && j.status !== "pending") continue;
-    if (j.type !== "render" && j.type !== "caption") continue;
-    const payload = j.payloadJson as { clip_id?: string; highlight_id?: string };
-    let clipId = payload?.clip_id;
+    if (j.type !== "render" && j.type !== "caption" && j.type !== "reedit")
+      continue;
+    const payload = j.payloadJson as {
+      clip_id?: string;
+      highlight_id?: string;
+      parent_clip_id?: string;
+    };
+    let clipId = payload?.clip_id ?? payload?.parent_clip_id;
     if (!clipId && payload?.highlight_id) {
       const c = clips.find((x) => x.highlightId === payload.highlight_id);
       clipId = c?.id;
@@ -185,10 +196,41 @@ export default async function ProjectPage({ params }: PageProps) {
     }
   }
 
-  const clipCards: ClipCardData[] = clips.map((c) => {
-    const highlight = highlights.find((h) => h.id === c.highlightId);
+  const clipsByHighlight = new Map<string, typeof clips>();
+  for (const c of clips) {
+    const list = clipsByHighlight.get(c.highlightId) ?? [];
+    list.push(c);
+    clipsByHighlight.set(c.highlightId, list);
+  }
+
+  const clipCards: ClipCardData[] = [];
+  for (const [highlightId, group] of clipsByHighlight) {
+    const sorted = [...group].sort((a, b) => {
+      const ta =
+        a.createdAt instanceof Date ? a.createdAt.getTime() : Number(a.createdAt);
+      const tb =
+        b.createdAt instanceof Date ? b.createdAt.getTime() : Number(b.createdAt);
+      return tb - ta;
+    });
+    const primary =
+      sorted.find((c) => c.isActive !== false && !c.supersededAt) ?? sorted[0];
+    if (!primary) continue;
+
+    const highlight = highlights.find((h) => h.id === highlightId);
+    const versions = sorted.map((v) => ({
+      id: v.id,
+      createdAt:
+        v.createdAt instanceof Date
+          ? v.createdAt.getTime()
+          : Number(v.createdAt),
+      durationSeconds: v.durationSeconds,
+      hasCaptions: v.hasCaptions,
+      isActive: v.isActive !== false && !v.supersededAt,
+      versionLabel: v.versionLabel,
+    }));
+
     const clipUploads = uploads
-      .filter((u) => u.clipId === c.id)
+      .filter((u) => u.clipId === primary.id)
       .map((u) => ({
         id: u.id,
         platform: u.platform as "youtube" | "instagram",
@@ -201,27 +243,36 @@ export default async function ProjectPage({ params }: PageProps) {
         externalUrl: u.externalUrl,
         errorMessage: u.errorMessage,
       }));
-    return {
-      id: c.id,
-      highlightId: c.highlightId,
+
+    clipCards.push({
+      id: primary.id,
+      highlightId: primary.highlightId,
       title:
         highlight?.title ||
         (highlight ? `Highlight @ ${formatTimecode(highlight.startSeconds)}` : "Clip"),
-      status: c.status as ClipCardData["status"],
-      filePath: c.filePath,
-      captionedFilePath: c.captionedFilePath,
-      hasCaptions: c.hasCaptions,
-      aspect: c.aspect,
-      durationSeconds: c.durationSeconds,
-      dominantColor: c.dominantColor,
-      errorMessage: c.errorMessage,
-      captionStyle: (c.captionStyleJson as ClipCaptionSettings) ?? null,
+      status: primary.status as ClipCardData["status"],
+      filePath: primary.filePath,
+      captionedFilePath: primary.captionedFilePath,
+      hasCaptions: primary.hasCaptions,
+      aspect: primary.aspect,
+      durationSeconds: primary.durationSeconds,
+      dominantColor: primary.dominantColor,
+      errorMessage: primary.errorMessage,
+      captionStyle: (primary.captionStyleJson as ClipCaptionSettings) ?? null,
       generatedMetadata:
         (highlight?.generatedMetadataJson as GeneratedUploadMetadata) ?? null,
-      activeJob: activeJobByClip.get(c.id) ?? null,
+      createdAt:
+        primary.createdAt instanceof Date
+          ? primary.createdAt.getTime()
+          : Number(primary.createdAt),
+      versionLabel: primary.versionLabel,
+      versions,
+      activeJob: activeJobByClip.get(primary.id) ?? null,
       uploads: clipUploads,
-    };
-  });
+    });
+  }
+
+  clipCards.sort((a, b) => b.createdAt - a.createdAt);
 
   const anyJobActive = jobs.some(
     (j) => j.status === "pending" || j.status === "running",
@@ -255,7 +306,7 @@ export default async function ProjectPage({ params }: PageProps) {
     .filter((j) => j.status === "pending" || j.status === "running")
     .map((j) => {
       let clipLabel: string | undefined;
-      if (j.type === "render" || j.type === "caption") {
+      if (j.type === "render" || j.type === "caption" || j.type === "reedit") {
         const payload = j.payloadJson as {
           clip_id?: string;
           highlight_id?: string;
@@ -293,6 +344,125 @@ export default async function ProjectPage({ params }: PageProps) {
     highlights.length > 0 ||
     clipCards.length > 0;
 
+  const twelvelabsIndexRows = video
+    ? await db
+        .select()
+        .from(schema.externalVideoIndexes)
+        .where(eq(schema.externalVideoIndexes.videoId, video.id))
+        .orderBy(desc(schema.externalVideoIndexes.updatedAt))
+    : [];
+
+  const twelvelabsReadyRows = twelvelabsIndexRows.filter(
+    (r) => r.status === "ready" && r.providerVideoId,
+  );
+  const twelvelabsIndex =
+    twelvelabsReadyRows[0] ??
+    twelvelabsIndexRows.find((r) => r.status === "ready") ??
+    twelvelabsIndexRows[0] ??
+    null;
+  const twelvelabsIndexChunkCount = twelvelabsReadyRows.length;
+  const twelvelabsIndexReadyCount = twelvelabsReadyRows.length;
+
+  const visualSegmentCount = video
+    ? (
+        await db
+          .select({ count: sql<number>`count(*)` })
+          .from(schema.visualSegments)
+          .where(eq(schema.visualSegments.videoId, video.id))
+      )[0]?.count ?? 0
+    : 0;
+
+  const twelvelabsRunning = jobs.some(
+    (j) =>
+      (j.type === "twelvelabs_index" || j.type === "twelvelabs_analyze") &&
+      (j.status === "pending" || j.status === "running"),
+  );
+
+  const tlConfig = getTwelveLabsConfigStatus();
+  const twelvelabsEnabled = tlConfig.enabled;
+  const geminiMultimodalEnabled = tlConfig.multimodalEnabled;
+
+  const visualByType = video
+    ? await db
+        .select({
+          segmentType: schema.visualSegments.segmentType,
+          count: sql<number>`count(*)`,
+        })
+        .from(schema.visualSegments)
+        .where(eq(schema.visualSegments.videoId, video.id))
+        .groupBy(schema.visualSegments.segmentType)
+        .orderBy(desc(sql`count(*)`))
+        .limit(12)
+    : [];
+
+  const visualCandidateStats = video
+    ? await db
+        .select({
+          source: schema.highlightCandidates.source,
+          count: sql<number>`count(*)`,
+        })
+        .from(schema.highlightCandidates)
+        .where(eq(schema.highlightCandidates.videoId, video.id))
+        .groupBy(schema.highlightCandidates.source)
+        .all()
+    : [];
+
+  const pegasusCandidateCount =
+    visualCandidateStats.find((r) => r.source === "twelvelabs_pegasus")?.count ??
+    0;
+  const marengoCandidateCount =
+    visualCandidateStats.find((r) => r.source === "twelvelabs_marengo")?.count ??
+    0;
+  const visualCandidateCount = visualCandidateStats
+    .filter((r) => r.source.startsWith("twelvelabs"))
+    .reduce((s, r) => s + Number(r.count), 0);
+
+  const analysisJobLogs = await db
+    .select({
+      id: schema.jobs.id,
+      type: schema.jobs.type,
+      status: schema.jobs.status,
+      progress: schema.jobs.progress,
+      progressMessage: schema.jobs.progressMessage,
+      errorMessage: schema.jobs.errorMessage,
+      resultJson: schema.jobs.resultJson,
+      createdAt: schema.jobs.createdAt,
+      finishedAt: schema.jobs.finishedAt,
+    })
+    .from(schema.jobs)
+    .where(
+      and(
+        eq(schema.jobs.projectId, id),
+        inArray(schema.jobs.type, [
+          "twelvelabs_index",
+          "twelvelabs_analyze",
+          "analyze",
+        ]),
+      ),
+    )
+    .orderBy(desc(schema.jobs.createdAt))
+    .limit(8);
+
+  const twelvelabsBadgeState = (() => {
+    if (!twelvelabsEnabled) return "disabled" as const;
+    if (twelvelabsRunning) return "running" as const;
+    if (visualSegmentCount > 0 || twelvelabsIndex?.status === "ready")
+      return "used" as const;
+    if (twelvelabsIndex?.status === "failed") return "failed_open" as const;
+    if (highlights.length > 0 || project.status === "ready") return "skipped" as const;
+    return "skipped" as const;
+  })();
+
+  const analysisBadgeState = {
+    twelvelabs: twelvelabsBadgeState,
+    geminiRerank: highlights.some((h) => {
+      const r = h.reasonJson as HighlightReason | null;
+      return (r?.llmScore ?? 0) > 0 || r?.signals?.includes("llm_pick");
+    }),
+    geminiMultimodal: geminiMultimodalEnabled && highlights.length > 0,
+    localSignals: highlights.length > 0 || Boolean(transcript),
+  };
+
   const defaultDescription = [
     project.name,
     settings.vibe ? `Vibe: ${settings.vibe}` : null,
@@ -326,9 +496,12 @@ export default async function ProjectPage({ params }: PageProps) {
             {settings.vibe ? ` · vibe: "${settings.vibe}"` : null}
           </p>
         </div>
-        <Badge variant={statusVariants[project.status] ?? "secondary"}>
-          {statusLabel}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={statusVariants[project.status] ?? "secondary"}>
+            {statusLabel}
+          </Badge>
+          <DeleteProjectDialog projectId={id} projectName={project.name} />
+        </div>
       </div>
 
       <ProjectPipelinePanel
@@ -339,6 +512,46 @@ export default async function ProjectPage({ params }: PageProps) {
         clipCount={clipCards.length}
         activeJobs={activePipelineJobs}
         show={showPipelinePanel}
+        twelvelabsEnabled={twelvelabsEnabled}
+        twelvelabsIndexReady={twelvelabsIndexReadyCount > 0}
+        hasVisualSegments={visualSegmentCount > 0}
+      />
+
+      <ProjectAnalysisDashboard
+        config={tlConfig}
+        analyzeModelTier={normalizeAnalyzeModel(settings.analyzeModel)}
+        indexStatus={twelvelabsIndex?.status ?? null}
+        indexError={twelvelabsIndex?.errorMessage ?? null}
+        providerVideoId={twelvelabsIndex?.providerVideoId ?? null}
+        indexChunkCount={twelvelabsIndexChunkCount}
+        indexReadyCount={twelvelabsIndexReadyCount}
+        visualSegmentCount={Number(visualSegmentCount)}
+        visualByType={visualByType.map((r) => ({
+          segmentType: r.segmentType ?? "unknown",
+          count: Number(r.count),
+        }))}
+        visualCandidateCount={visualCandidateCount}
+        pegasusCandidateCount={Number(pegasusCandidateCount)}
+        marengoCandidateCount={Number(marengoCandidateCount)}
+        recentJobs={analysisJobLogs.map((j) => ({
+          id: j.id,
+          type: j.type,
+          status: j.status,
+          progress: j.progress,
+          progressMessage: j.progressMessage,
+          errorMessage: j.errorMessage,
+          resultJson: (j.resultJson as Record<string, unknown> | null) ?? null,
+          createdAt: j.createdAt,
+          finishedAt: j.finishedAt,
+        }))}
+        projectNotes={project.notes}
+        show={
+          Boolean(transcript) &&
+          (twelvelabsEnabled ||
+            visualSegmentCount > 0 ||
+            analysisJobLogs.length > 0 ||
+            project.status === "analyzing")
+        }
       />
 
       {highlights.length > 0 && (
@@ -355,10 +568,13 @@ export default async function ProjectPage({ params }: PageProps) {
                   Click <strong>Render</strong> on any of them to cut the final
                   vertical video and (optionally) burn in captions.
                 </CardDescription>
+                <div className="mt-2">
+                  <AnalysisBadges state={analysisBadgeState} />
+                </div>
               </div>
               <ReanalyzeDialog
                 projectId={id}
-                savedModel={settings.analyzeModel}
+                savedModel={normalizeAnalyzeModel(settings.analyzeModel)}
                 savedVibe={settings.vibe}
                 disabled={!transcript || pipelineActive}
                 disabledReason={
@@ -409,27 +625,35 @@ export default async function ProjectPage({ params }: PageProps) {
                     </p>
                   )}
                   {reason && (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {reason.signals?.map((sig) => (
-                        <span
-                          key={sig}
-                          className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
-                        >
-                          {sig.replace(/_/g, " ")}
-                        </span>
-                      ))}
-                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                        audio {((reason.audioScore ?? 0) * 100).toFixed(0)}
-                      </span>
-                      <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                        chat {((reason.chatScore ?? 0) * 100).toFixed(0)}
-                      </span>
-                      {reason.llmScore > 0 && (
+                    <>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {reason.signals?.map((sig) => (
+                          <span
+                            key={sig}
+                            className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground"
+                          >
+                            {sig.replace(/_/g, " ")}
+                          </span>
+                        ))}
                         <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                          llm {((reason.llmScore ?? 0) * 100).toFixed(0)}
+                          audio {((reason.audioScore ?? 0) * 100).toFixed(0)}
                         </span>
-                      )}
-                    </div>
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                          chat {((reason.chatScore ?? 0) * 100).toFixed(0)}
+                        </span>
+                        {(reason.visualScore ?? 0) > 0 && (
+                          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                            visual {((reason.visualScore ?? 0) * 100).toFixed(0)}
+                          </span>
+                        )}
+                        {reason.llmScore > 0 && (
+                          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                            llm {((reason.llmScore ?? 0) * 100).toFixed(0)}
+                          </span>
+                        )}
+                      </div>
+                      <HighlightEvidenceDetails reason={reason} />
+                    </>
                   )}
                   <div className="mt-3 flex justify-end">
                     <RenderHighlightButton
@@ -484,7 +708,7 @@ export default async function ProjectPage({ params }: PageProps) {
               <div className="flex justify-center">
                 <ReanalyzeDialog
                   projectId={id}
-                  savedModel={settings.analyzeModel}
+                  savedModel={normalizeAnalyzeModel(settings.analyzeModel)}
                   savedVibe={settings.vibe}
                 />
               </div>

@@ -24,8 +24,8 @@ from ..config import get_settings
 from ..db import session_scope
 from ..models import Project, Transcript, TranscriptSegment, Video
 from ..transcribe import transcribe as run_transcription
-from . import queue
 from .handlers import ProgressReporter, register
+from .pipeline_enqueue import enqueue_post_transcribe
 
 log = structlog.get_logger(__name__)
 
@@ -86,11 +86,7 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
             existing_id = existing.id
             existing_video_id = video.id
             # Enqueue outside the session to keep the transaction tight.
-            next_job = queue.enqueue(
-                "analyze",
-                {"project_id": project_id, "video_id": existing_video_id},
-                project_id=project_id,
-            )
+            next_job = enqueue_post_transcribe(project_id, existing_video_id)
             return {
                 "transcript_id": existing_id,
                 "video_id": existing_video_id,
@@ -164,12 +160,8 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
             # Step 7 (analyze) takes it from here.
             _set_project_status(session, project, "analyzing")
 
-    # Chain Step 7: hand off to analyze.
-    next_job = queue.enqueue(
-        "analyze",
-        {"project_id": project_id, "video_id": video_id},
-        project_id=project_id,
-    )
+    # Chain: TwelveLabs index/analyze (if enabled) → analyze.
+    next_job = enqueue_post_transcribe(project_id, video_id)
 
     progress(1.0, "transcribe complete")
     log.info(

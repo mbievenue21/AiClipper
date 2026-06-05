@@ -103,10 +103,10 @@ export function AdminActionsPanel() {
         />
         <ActionButton
           label="Delete all failed projects"
-          description="Remove every project in the 'failed' status (and their child rows via FK cascade)."
+          description="Remove every failed project, cancel its jobs, and delete media on disk."
           variant="destructive"
           action={deleteFailedProjectsAction}
-          confirm="Delete EVERY failed project? This cascade-deletes their jobs, transcripts, and highlights."
+          confirm="Delete EVERY failed project? This permanently removes jobs, transcripts, highlights, clips, and downloaded media."
         />
       </CardContent>
     </Card>

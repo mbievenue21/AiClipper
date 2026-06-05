@@ -30,8 +30,11 @@ import {
 } from "@/lib/db/schema";
 import { asc, eq } from "drizzle-orm";
 
-const MODEL = "gemini-2.5-flash";
+// Newest stable Flash. Override with GEMINI_FLASH_MODEL if you want.
+// https://ai.google.dev/gemini-api/docs/models
+const MODEL = process.env.GEMINI_FLASH_MODEL || "gemini-3.5-flash";
 const ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
+const IS_GEMINI_3 = MODEL.toLowerCase().startsWith("gemini-3");
 
 /** JSON schema we ask Gemini to fill. Loose enough to allow creativity, strict enough to typecheck. */
 const RESPONSE_SCHEMA = {
@@ -356,16 +359,24 @@ export async function generateMetadata(
   //   chatty models without enabling thinking.
   // - `responseSchema` is enforced by Gemini's server-side JSON-mode, so the
   //   only failure path is truncation (handled below) or a refusal.
+  // Gemini 3.x: use thinkingLevel (drop temperature/topP — optimized for
+  // defaults). Gemini 2.5: temperature + thinkingBudget=0 to skip the hidden
+  // reasoning pass that was truncating the JSON payload.
+  const generationConfig: Record<string, unknown> = {
+    responseMimeType: "application/json",
+    responseSchema: RESPONSE_SCHEMA,
+    maxOutputTokens: 2048,
+  };
+  if (IS_GEMINI_3) {
+    generationConfig.thinkingConfig = { thinkingLevel: "low" };
+  } else {
+    generationConfig.temperature = 0.85;
+    generationConfig.topP = 0.95;
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.85,
-      topP: 0.95,
-      responseMimeType: "application/json",
-      responseSchema: RESPONSE_SCHEMA,
-      maxOutputTokens: 2048,
-      thinkingConfig: { thinkingBudget: 0 },
-    },
+    generationConfig,
   };
 
   const url = `${ENDPOINT}?key=${encodeURIComponent(apiKey)}`;

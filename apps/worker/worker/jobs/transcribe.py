@@ -22,6 +22,7 @@ from sqlalchemy import select
 
 from ..config import get_settings
 from ..db import session_scope
+from ..pipeline_report import merge_flow_report
 from ..models import Project, Transcript, TranscriptSegment, Video
 from ..transcribe import transcribe as run_transcription
 from .handlers import ProgressReporter, register
@@ -86,7 +87,24 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
             existing_id = existing.id
             existing_video_id = video.id
             # Enqueue outside the session to keep the transaction tight.
-            next_job = enqueue_post_transcribe(project_id, existing_video_id)
+            run_id = str(payload.get("pipeline_run_id") or "")
+            merge_flow_report(
+                project_id,
+                stage="transcribe",
+                data={
+                    "status": "skipped",
+                    "skipped": True,
+                    "reason": "transcript_already_exists",
+                    "backend": get_settings().transcribe_backend,
+                },
+                pipeline_run_id=run_id or None,
+                settings_snapshot=project.settings,
+            )
+            next_job = enqueue_post_transcribe(
+                project_id,
+                existing_video_id,
+                pipeline_run_id=run_id or None,
+            )
             return {
                 "transcript_id": existing_id,
                 "video_id": existing_video_id,
@@ -166,6 +184,24 @@ async def handle_transcribe(job, progress: ProgressReporter) -> dict[str, Any]:
         project_id,
         video_id,
         pipeline_run_id=run_id or None,
+    )
+
+    with session_scope() as session:
+        project = session.get(Project, project_id)
+        settings_snapshot = project.settings if project else {}
+    merge_flow_report(
+        project_id,
+        stage="transcribe",
+        data={
+            "status": "ok",
+            "backend": get_settings().transcribe_backend,
+            "model": result.model_name,
+            "language": result.language,
+            "segmentCount": len(result.segments),
+            "wordCount": result.word_count if hasattr(result, "word_count") else None,
+        },
+        pipeline_run_id=run_id or None,
+        settings_snapshot=settings_snapshot,
     )
 
     progress(1.0, "transcribe complete")

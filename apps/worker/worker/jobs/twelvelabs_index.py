@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from ..config import get_settings
 from ..db import session_scope
+from ..pipeline_report import merge_flow_report
 from ..media.probe import probe_video
 from ..media.twelvelabs_split import chunk_output_dir, materialize_upload_chunks
 from ..models import ExternalVideoIndex, Video
@@ -43,8 +44,16 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
     # completion after Ctrl+C.
     should_stop = make_should_stop(job.id)
 
+    run_id = str(payload.get("pipeline_run_id") or "") or None
+
     if not client.enabled():
         log.info("twelvelabs_index_skipped_disabled", project_id=project_id)
+        merge_flow_report(
+            project_id,
+            stage="twelvelabs_index",
+            data={"status": "skipped", "skipped": True, "reason": "disabled"},
+            pipeline_run_id=run_id,
+        )
         next_job = queue.enqueue(
             "analyze",
             forward_payload(payload, project_id=project_id, video_id=video_id),
@@ -54,6 +63,12 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
 
     if not settings.twelvelabs_api_key:
         log.warning("twelvelabs_index_skipped_no_api_key", project_id=project_id)
+        merge_flow_report(
+            project_id,
+            stage="twelvelabs_index",
+            data={"status": "skipped", "skipped": True, "reason": "missing_api_key"},
+            pipeline_run_id=run_id,
+        )
         next_job = queue.enqueue(
             "analyze",
             forward_payload(payload, project_id=project_id, video_id=video_id),
@@ -63,6 +78,12 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
 
     if not settings.twelvelabs_index_id:
         log.warning("twelvelabs_index_skipped_no_index_id", project_id=project_id)
+        merge_flow_report(
+            project_id,
+            stage="twelvelabs_index",
+            data={"status": "skipped", "skipped": True, "reason": "missing_index_id"},
+            pipeline_run_id=run_id,
+        )
         next_job = queue.enqueue(
             "analyze",
             forward_payload(payload, project_id=project_id, video_id=video_id),
@@ -121,6 +142,17 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
             "twelvelabs_index_reuse",
             project_id=project_id,
             chunk_count=len(existing_rows),
+        )
+        merge_flow_report(
+            project_id,
+            stage="twelvelabs_index",
+            data={
+                "status": "ok",
+                "skipped": False,
+                "reused": True,
+                "chunkCount": len(existing_rows),
+            },
+            pipeline_run_id=run_id,
         )
         next_job = queue.enqueue(
             "twelvelabs_analyze",
@@ -257,9 +289,21 @@ async def handle_twelvelabs_index(job, progress: ProgressReporter) -> dict[str, 
             session.flush()
             index_ids.append(row.id)
 
+    merge_flow_report(
+        project_id,
+        stage="twelvelabs_index",
+        data={
+            "status": "ok",
+            "skipped": False,
+            "reused": False,
+            "chunkCount": total,
+            "fileSizeGb": round(file_size / (1024**3), 3),
+        },
+        pipeline_run_id=run_id,
+    )
     next_job = queue.enqueue(
         "twelvelabs_analyze",
-        {"project_id": project_id, "video_id": video_id},
+        forward_payload(payload, project_id=project_id, video_id=video_id),
         project_id=project_id,
     )
     progress(1.0, f"TwelveLabs index ready ({total} chunk(s))")

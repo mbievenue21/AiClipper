@@ -107,6 +107,11 @@ class Settings(BaseSettings):
     twelvelabs_max_analyze_chunk_seconds: int = Field(
         default=7200, alias="TWELVELABS_MAX_ANALYZE_CHUNK_SECONDS"
     )
+    twelvelabs_pegasus_chunk_seconds: int = Field(
+        default=1200,
+        alias="TWELVELABS_PEGASUS_CHUNK_SECONDS",
+        description="Max seconds per Pegasus analyze window (smaller = faster, less timeout risk).",
+    )
     twelvelabs_chunk_overlap_seconds: int = Field(
         default=15, alias="TWELVELABS_CHUNK_OVERLAP_SECONDS"
     )
@@ -130,6 +135,10 @@ class Settings(BaseSettings):
     twelvelabs_max_upload_bytes: int = Field(
         default=1_900_000_000, alias="TWELVELABS_MAX_UPLOAD_BYTES"
     )
+
+    # ---- Publishing: YouTube OAuth (app credentials, not per-channel) ----
+    youtube_client_id: str = Field(default="", alias="YOUTUBE_CLIENT_ID")
+    youtube_client_secret: str = Field(default="", alias="YOUTUBE_CLIENT_SECRET")
 
     # ---- Job loop tuning --------------------------------------------------
     job_poll_interval_seconds: float = Field(default=1.0)

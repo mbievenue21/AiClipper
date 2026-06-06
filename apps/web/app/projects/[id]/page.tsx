@@ -37,6 +37,7 @@ import { getTwelveLabsConfigStatus } from "@/lib/twelvelabs/status";
 import { ReanalyzeDialog } from "./reanalyze-dialog";
 import { DeleteProjectDialog } from "./delete-project-dialog";
 import { PipelineTimingDialog } from "./pipeline-timing-dialog";
+import { PipelineFlowReportPanel } from "./pipeline-flow-report";
 import { getProjectTimingBreakdown } from "@/lib/pipeline/analytics";
 
 export const dynamic = "force-dynamic";
@@ -556,6 +557,16 @@ export default async function ProjectPage({ params }: PageProps) {
           (twelvelabsEnabled ||
             visualSegmentCount > 0 ||
             analysisJobLogs.length > 0 ||
+            project.status === "analyzing")
+        }
+      />
+
+      <PipelineFlowReportPanel
+        report={project.pipelineReportJson}
+        show={
+          Boolean(project.pipelineReportJson?.stages) &&
+          (project.status === "ready" ||
+            highlights.length > 0 ||
             project.status === "analyzing")
         }
       />

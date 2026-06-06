@@ -108,6 +108,17 @@ export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   analyzeModel: "flash",
 };
 
+/** Debug report: which pipeline branches ran and what each stage received. */
+export type PipelineFlowReport = {
+  version: number;
+  generatedAt: number;
+  complete?: boolean;
+  pipelineRunId?: string | null;
+  projectSettings?: Partial<ProjectSettings>;
+  stages?: Record<string, Record<string, unknown>>;
+  decisions?: string[];
+};
+
 export const projects = sqliteTable("projects", {
   id: id(),
   name: text("name").notNull(),
@@ -130,6 +141,10 @@ export const projects = sqliteTable("projects", {
     .default("pending"),
   notes: text("notes"),
   settingsJson: text("settings_json", { mode: "json" }).$type<ProjectSettings>(),
+  /** Per-run path/decisions report for debugging analysis pipeline choices. */
+  pipelineReportJson: text("pipeline_report_json", { mode: "json" }).$type<
+    PipelineFlowReport | null
+  >(),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -777,7 +792,6 @@ export type PipelineStageKey =
   | "transcribe"
   | "twelvelabs_index"
   | "twelvelabs_visual"
-  | "pyscene_detect"
   | "librosa_audio"
   | "chat_density"
   | "candidate_generation"
@@ -795,7 +809,6 @@ export const PIPELINE_STAGE_DEFS: {
   { key: "transcribe", label: "Transcribe", group: "core" },
   { key: "twelvelabs_index", label: "TL index", group: "twelvelabs" },
   { key: "twelvelabs_visual", label: "TL visual", group: "twelvelabs" },
-  { key: "pyscene_detect", label: "Scene cuts", group: "analyze" },
   { key: "librosa_audio", label: "Librosa audio", group: "analyze" },
   { key: "chat_density", label: "Chat density", group: "analyze" },
   { key: "candidate_generation", label: "Candidates", group: "analyze" },

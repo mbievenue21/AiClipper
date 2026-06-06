@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 from .audio_features import AudioFeatureSeries
 from .chat_features import ChatDensitySeries
+from .signal_peaks import find_peak_indices
 
 # Light keyword signal — these phrases tend to mark interesting moments.
 _KEYWORD_PATTERN = re.compile(
@@ -104,25 +105,6 @@ def _keyword_density(text: str) -> float:
         return 0.0
     hits = len(_KEYWORD_PATTERN.findall(text))
     return min(1.0, hits / 3.0)
-
-
-def _find_peaks(values: list[float], *, min_height: float, min_distance: int) -> list[int]:
-    """Simple peak finder without scipy."""
-    if not values:
-        return []
-    peaks: list[int] = []
-    n = len(values)
-    for i in range(1, n - 1):
-        if values[i] < min_height:
-            continue
-        if values[i] <= values[i - 1] or values[i] < values[i + 1]:
-            continue
-        if peaks and (i - peaks[-1]) < min_distance:
-            if values[i] > values[peaks[-1]]:
-                peaks[-1] = i
-            continue
-        peaks.append(i)
-    return peaks
 
 
 def _transcript_for_window(
@@ -370,7 +352,9 @@ def generate_candidates(
 
     if audio and audio.samples:
         excitement = [s["excitement"] for s in audio.samples]
-        audio_peaks = _find_peaks(excitement, min_height=0.55, min_distance=int(min_seconds))
+        audio_peaks = find_peak_indices(
+            excitement, min_height=0.55, min_distance=int(min_seconds)
+        )
         candidates.extend(
             _peak_anchored_candidates(
                 audio_peaks,
@@ -388,7 +372,9 @@ def generate_candidates(
         )
 
     if chat and chat.normalised and chat.total_messages > 0:
-        chat_peaks = _find_peaks(chat.normalised, min_height=0.5, min_distance=int(min_seconds))
+        chat_peaks = find_peak_indices(
+            chat.normalised, min_height=0.5, min_distance=int(min_seconds)
+        )
         candidates.extend(
             _peak_anchored_candidates(
                 chat_peaks,

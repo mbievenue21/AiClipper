@@ -28,6 +28,7 @@ import structlog
 from sqlalchemy import select
 
 from ..config import get_settings
+from ..pipeline_report import merge_flow_report
 from ..pipeline_timing import begin_run, update_run
 from ..db import session_scope
 from ..media.ffmpeg_util import extract_mono_wav
@@ -270,6 +271,24 @@ async def handle_ingest(job, progress: ProgressReporter) -> dict[str, Any]:
         update_run(
             pipeline_run_id,
             video_duration_seconds=float(meta.duration_seconds or 0),
+        )
+
+        with session_scope() as session:
+            project = session.get(Project, project_id)
+            settings_snapshot = project.settings if project else {}
+        merge_flow_report(
+            project_id,
+            stage="ingest",
+            data={
+                "status": "ok",
+                "sourceType": source_type,
+                "durationSeconds": meta.duration_seconds,
+                "chatDownloaded": bool(rel_chat),
+                "sizeBytes": meta.size_bytes,
+                "resolution": f"{meta.width}x{meta.height}" if meta.width else None,
+            },
+            pipeline_run_id=pipeline_run_id,
+            settings_snapshot=settings_snapshot,
         )
 
         # Chain Step 6: hand off to the transcribe job.

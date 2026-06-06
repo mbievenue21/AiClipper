@@ -53,6 +53,7 @@ class Project(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")
     notes: Mapped[str | None] = mapped_column(Text)
     settings_json: Mapped[str | None] = mapped_column(Text)
+    pipeline_report_json: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
     updated_at: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
@@ -80,6 +81,21 @@ class Project(Base):
     @settings.setter
     def settings(self, value: dict[str, Any]) -> None:
         self.settings_json = json.dumps(value) if value is not None else None
+
+    @property
+    def pipeline_report(self) -> dict[str, Any]:
+        if self.pipeline_report_json:
+            try:
+                loaded = json.loads(self.pipeline_report_json)
+                if isinstance(loaded, dict):
+                    return loaded
+            except json.JSONDecodeError:
+                pass
+        return {}
+
+    @pipeline_report.setter
+    def pipeline_report(self, value: dict[str, Any]) -> None:
+        self.pipeline_report_json = json.dumps(value) if value else None
 
 
 class Video(Base):

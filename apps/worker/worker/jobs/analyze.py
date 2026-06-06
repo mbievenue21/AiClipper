@@ -14,10 +14,10 @@ from sqlalchemy import select
 from ..analyze import AnalysisInput, analyze_project
 from ..analyze.candidates import Segment
 from ..analyze.chat_features import iter_existing_events, parse_twitch_chat
-from ..analyze.scene_features import detect_scene_cuts_full
 from ..config import get_settings
 from ..db import session_scope
-from ..pipeline_timing import ensure_run_id, record_stage, record_stages
+from ..pipeline_report import build_path_decisions, finalize_flow_report, merge_flow_report
+from ..pipeline_timing import complete_run, ensure_run_id, record_stage, record_stages
 from ..models import (
     AudioFeatures,
     ChatEvent,
@@ -129,14 +129,6 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         had_audio_features = existing_audio_features is not None
         had_highlights = len(existing_highlights_count) > 0
 
-        # Load persisted scene cuts if available.
-        scene_cuts: list[float] = []
-        if video.scene_cuts_json:
-            try:
-                scene_cuts = json.loads(video.scene_cuts_json)
-            except json.JSONDecodeError:
-                scene_cuts = []
-
         visual_rows = (
             session.execute(
                 select(VisualSegment)
@@ -209,39 +201,6 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
 
     source_video_abs = _media_abs(video_rel) if video_rel else None
 
-    # Detect scene cuts once per video if not already stored.
-    if not scene_cuts and source_video_abs and source_video_abs.exists():
-        progress(0.02, "detecting scene cuts")
-        pyscene_started = time.perf_counter()
-        pyscene_started_at = _now_ms()
-        try:
-            scene_cuts = await detect_scene_cuts_full(source_video_abs)
-            log.info("scene_cuts_detected", count=len(scene_cuts))
-            record_stage(
-                run_id=pipeline_run_id,
-                project_id=project_id,
-                stage="pyscene_detect",
-                duration_ms=int((time.perf_counter() - pyscene_started) * 1000),
-                started_at=pyscene_started_at,
-                finished_at=_now_ms(),
-                status="ok",
-                job_id=job.id,
-                meta={"scene_count": len(scene_cuts)},
-            )
-        except Exception as exc:
-            log.warning("scene_cuts_failed", error=str(exc))
-            record_stage(
-                run_id=pipeline_run_id,
-                project_id=project_id,
-                stage="pyscene_detect",
-                duration_ms=int((time.perf_counter() - pyscene_started) * 1000),
-                started_at=pyscene_started_at,
-                finished_at=_now_ms(),
-                status="failed",
-                job_id=job.id,
-                meta={"error": str(exc)[:300]},
-            )
-
     # Accept logical tiers ("pro"/"flash"), legacy IDs ("gemini-2.5-*"), or an
     # explicit model string. gemini.resolve_model() maps these to current IDs.
     analyze_model_override = payload.get("analyze_model_override")
@@ -271,7 +230,7 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         tail_padding_seconds=float(settings.get("tailPaddingSeconds", 2)),
         analyze_model=chosen_model,
         source_video_path=source_video_abs,
-        scene_cuts=scene_cuts,
+        scene_cuts=[],
         visual_segments=visual_segments or None,
         twelvelabs_used=twelvelabs_used,
     )
@@ -300,9 +259,6 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
     save_started_at = _now_ms()
     with session_scope() as session:
         video_row = session.get(Video, video_id)
-        if video_row is not None and result.scene_cuts:
-            video_row.scene_cuts_json = json.dumps(result.scene_cuts)
-
         if had_audio_features:
             session.execute(
                 select(AudioFeatures).where(AudioFeatures.video_id == video_id)
@@ -372,6 +328,44 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
                 note = "\n".join(result.notes)[:2000]
             _set_project_status(session, project, "ready", note=note)
 
+    from ..analyze.gemini import resolve_model
+
+    seed_counts = {
+        src: sum(1 for c in result.candidates if c.seed_source == src)
+        for src in ("transcript", "audio_peak", "chat_peak")
+    }
+    report = merge_flow_report(
+        project_id,
+        stage="analyze",
+        data={
+            "status": "ok",
+            "fusionUsed": result.fusion_used,
+            "twelvelabsUsed": twelvelabs_used,
+            "visualSegmentCount": len(visual_segments),
+            "localCandidateCount": result.local_candidate_count,
+            "candidateCount": len(result.candidates),
+            "highlightCount": len(result.highlights),
+            "geminiUsed": result.used_llm,
+            "geminiModel": resolve_model(chosen_model) if result.used_llm else None,
+            "analyzeModelTier": chosen_model,
+            "vibeUsed": chosen_vibe,
+            "enrichmentUsed": result.enrichment_used,
+            "multimodalUsed": result.multimodal_used,
+            "chatAvailable": bool(chat_events_internal),
+            "seedCounts": seed_counts,
+            "stageTimingsMs": result.stage_timings_ms,
+            "notes": result.notes,
+        },
+        pipeline_run_id=pipeline_run_id,
+        settings_snapshot=settings,
+    )
+    finalize_flow_report(
+        project_id,
+        decisions=build_path_decisions(report),
+        pipeline_run_id=pipeline_run_id,
+    )
+    complete_run(pipeline_run_id, status="complete")
+
     record_stage(
         run_id=pipeline_run_id,
         project_id=project_id,
@@ -392,8 +386,6 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         candidates=len(result.candidates),
         used_llm=result.used_llm,
     )
-
-    from ..analyze.gemini import resolve_model
 
     return {
         "project_id": project_id,

@@ -110,6 +110,10 @@ class AnalysisOutput:
     scene_cuts: list[float] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     stage_timings_ms: dict[str, int] = field(default_factory=dict)
+    local_candidate_count: int = 0
+    fusion_used: bool = False
+    enrichment_used: bool = False
+    multimodal_used: bool = False
 
 
 def _tick() -> float:
@@ -126,10 +130,12 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
     audio_series = compute_audio_features(inputs.audio_path)
     timings["librosa_audio"] = int((_tick() - t0) * 1000)
 
+    enrichment_used = False
     if is_enrichment_configured():
         progress(0.15, "running audio enrichment pass")
         enrichment = run_enrichment(inputs.audio_path)
         if enrichment and enrichment.events:
+            enrichment_used = True
             notes.append(
                 f"Enrichment ({enrichment.backend}): {len(enrichment.events)} events."
             )
@@ -156,8 +162,10 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
     timings["candidate_generation"] = int((_tick() - t0) * 1000)
 
     visual_segments = list(inputs.visual_segments or [])
+    fusion_used = False
     t0 = _tick()
     if visual_segments:
+        fusion_used = True
         progress(0.72, "fusing local + TwelveLabs visual candidates")
         fused = fuse_highlight_candidates(
             local_candidates,
@@ -204,12 +212,16 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
             scene_cuts=scene_cuts,
             notes=notes,
             stage_timings_ms=timings,
+            local_candidate_count=len(local_candidates),
+            fusion_used=fusion_used,
+            enrichment_used=enrichment_used,
         )
 
     progress(0.80, f"asking {inputs.analyze_model} to pick the best clips")
     llm_picks: list[LlmPick] | None = None
     max_pre_roll = max(inputs.pre_roll_seconds, 4.0) + 4.0
 
+    multimodal_used = False
     t0 = _tick()
     if gemini_configured():
         llm_picks = rerank_with_gemini(
@@ -228,6 +240,7 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         if llm_picks is None:
             notes.append("Gemini call failed; falling back to local score.")
         elif is_multimodal_enabled() and inputs.source_video_path:
+            multimodal_used = True
             progress(0.88, "multimodal boundary refinement")
             llm_picks = refine_boundaries_multimodal(
                 candidates,
@@ -265,6 +278,10 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         scene_cuts=scene_cuts,
         notes=notes,
         stage_timings_ms=timings,
+        local_candidate_count=len(local_candidates),
+        fusion_used=fusion_used,
+        enrichment_used=enrichment_used,
+        multimodal_used=multimodal_used,
     )
 
 

@@ -36,7 +36,10 @@ log = structlog.get_logger(__name__)
 
 API_BASE = "https://api.twelvelabs.io/v1.3"
 PROVIDER = "twelvelabs"
-SYNC_ANALYZE_MAX_SECONDS = 3600.0
+# Windows longer than this use async /analyze/tasks (sync HTTP read times out on long VODs).
+SYNC_ANALYZE_MAX_SECONDS = 600.0
+# TwelveLabs measures uploaded asset duration slightly below local ffprobe.
+END_TIME_SAFETY_SECONDS = 0.5
 
 
 @dataclass
@@ -85,8 +88,17 @@ class TwelveLabsClient:
                 h.update(chunk)
         return h.hexdigest()
 
-    def compute_chunks(self, duration_seconds: float) -> list[AnalysisChunk]:
-        max_chunk = float(self.settings.twelvelabs_max_analyze_chunk_seconds)
+    def compute_chunks(
+        self,
+        duration_seconds: float,
+        *,
+        max_chunk_seconds: float | None = None,
+    ) -> list[AnalysisChunk]:
+        max_chunk = float(
+            max_chunk_seconds
+            if max_chunk_seconds is not None
+            else self.settings.twelvelabs_max_analyze_chunk_seconds
+        )
         overlap = float(self.settings.twelvelabs_chunk_overlap_seconds)
         if duration_seconds <= 0 or duration_seconds <= max_chunk:
             return [AnalysisChunk(0, 0.0, max(duration_seconds, 0.0))]
@@ -204,12 +216,65 @@ class TwelveLabsClient:
         """Legacy shim — v1.3 ensure_index blocks until ready."""
         return ExternalIndexStatus(status="ready", provider_video_id=provider_task_id)
 
+    def _get_asset_duration_seconds(self, asset_id: str) -> float | None:
+        """Best-effort duration from TwelveLabs asset metadata."""
+        if not asset_id:
+            return None
+        try:
+            resp = self._request_with_retry("GET", f"/assets/{asset_id}")
+        except Exception as exc:
+            log.warning(
+                "twelvelabs_asset_duration_lookup_failed",
+                asset_id=asset_id,
+                error=str(exc)[:200],
+            )
+            return None
+        duration = self._parse_asset_duration_seconds(resp)
+        if duration is not None:
+            log.info(
+                "twelvelabs_asset_duration",
+                asset_id=asset_id,
+                duration_seconds=round(duration, 3),
+            )
+        return duration
+
+    @staticmethod
+    def _parse_asset_duration_seconds(payload: dict[str, Any]) -> float | None:
+        for key in ("duration", "video_duration", "duration_seconds"):
+            val = payload.get(key)
+            if isinstance(val, (int, float)) and val > 0:
+                return float(val)
+        for nested in ("system_metadata", "metadata", "video", "asset"):
+            block = payload.get(nested)
+            if isinstance(block, dict):
+                parsed = TwelveLabsClient._parse_asset_duration_seconds(block)
+                if parsed is not None:
+                    return parsed
+        return None
+
+    @staticmethod
+    def _clamp_analyze_end(
+        start_seconds: float,
+        end_seconds: float,
+        max_duration_seconds: float | None,
+    ) -> float:
+        if end_seconds <= start_seconds:
+            return end_seconds
+        cap = end_seconds
+        if max_duration_seconds is not None and max_duration_seconds > 0:
+            cap = min(
+                cap,
+                max(0.0, max_duration_seconds - END_TIME_SAFETY_SECONDS),
+            )
+        return max(start_seconds + 0.1, cap)
+
     def segment_highlights(
         self,
         asset_id: str,
         context: TwelveLabsPromptContext,
         *,
         chunk: AnalysisChunk | None = None,
+        asset_duration_seconds: float | None = None,
     ) -> list[VisualSegmentResult]:
         """Pegasus 1.5 structured segmentation via sync or async analyze APIs."""
         prompt = build_twelvelabs_segmentation_prompt(context)
@@ -230,16 +295,37 @@ class TwelveLabsClient:
             "temperature": 0.2,
         }
         if chunk and chunk.end_seconds > chunk.start_seconds:
+            duration_cap = asset_duration_seconds
+            if duration_cap is None:
+                duration_cap = self._get_asset_duration_seconds(asset_id)
+            clamped_end = self._clamp_analyze_end(
+                chunk.start_seconds,
+                chunk.end_seconds,
+                duration_cap,
+            )
+            if clamped_end < chunk.end_seconds - 0.01:
+                log.info(
+                    "twelvelabs_end_time_clamped",
+                    requested_end=round(chunk.end_seconds, 3),
+                    clamped_end=round(clamped_end, 3),
+                    asset_duration=round(duration_cap, 3) if duration_cap else None,
+                )
             body["start_time"] = chunk.start_seconds
-            body["end_time"] = chunk.end_seconds
+            body["end_time"] = clamped_end
+            window_seconds = clamped_end - chunk.start_seconds
 
         use_sync = window_seconds <= 0 or window_seconds <= SYNC_ANALYZE_MAX_SECONDS
         if use_sync:
             body["stream"] = False
-            result = self._request_with_retry("POST", "/analyze", json=body)
+            read_timeout = min(1800.0, max(300.0, window_seconds * 0.4 + 120.0))
+            result = self._request_with_retry(
+                "POST", "/analyze", json=body, timeout=read_timeout
+            )
             parsed = self._extract_analyze_payload(result)
         else:
-            task = self._request_with_retry("POST", "/analyze/tasks", json=body)
+            task = self._request_with_retry(
+                "POST", "/analyze/tasks", json=body, timeout=60.0
+            )
             task_id = str(task.get("task_id") or task.get("_id") or task.get("id") or "")
             if not task_id:
                 raise RuntimeError("TwelveLabs async analyze task missing id")
@@ -267,22 +353,30 @@ class TwelveLabsClient:
         *,
         duration_seconds: float,
         chunk: AnalysisChunk | None = None,
-    ) -> list[VisualSegmentResult]:
+        asset_duration_seconds: float | None = None,
+        return_raw_hit_count: bool = False,
+    ) -> list[VisualSegmentResult] | tuple[list[VisualSegmentResult], int]:
         """Marengo semantic search (multipart /search)."""
         index_id = self.settings.twelvelabs_index_id
         if not index_id:
-            return []
+            return ([], 0) if return_raw_hit_count else []
 
         all_hits: list[VisualSegmentResult] = []
+        raw_hit_count = 0
         model = self.settings.twelvelabs_model_marengo
         limit = self.settings.twelvelabs_max_search_results_per_query
 
         for query in queries:
             filter_obj: dict[str, Any] = {"id": [indexed_asset_id]}
             if chunk and chunk.end_seconds > chunk.start_seconds:
+                chunk_end = self._clamp_analyze_end(
+                    chunk.start_seconds,
+                    chunk.end_seconds,
+                    asset_duration_seconds,
+                )
                 filter_obj["duration"] = {
                     "gte": chunk.start_seconds,
-                    "lte": chunk.end_seconds,
+                    "lte": chunk_end,
                 }
 
             multipart: list[tuple[str, tuple[None, str]]] = [
@@ -302,6 +396,12 @@ class TwelveLabsClient:
                 log.warning("twelvelabs_search_failed", query=query[:80], error=str(exc))
                 continue
 
+            raw_items = resp.get("data") or resp.get("clips") or resp.get("search_results") or []
+            if isinstance(raw_items, dict):
+                raw_items = raw_items.get("data") or []
+            if isinstance(raw_items, list):
+                raw_hit_count += len(raw_items)
+
             hits = parse_marengo_search_hits(
                 resp,
                 query=query,
@@ -312,8 +412,16 @@ class TwelveLabsClient:
             all_hits.extend(hits)
 
         deduped = deduplicate_visual_segments(all_hits)
-        log.info("twelvelabs_search_done", queries=len(queries), hits=len(deduped))
-        return deduped[: self.settings.twelvelabs_visual_candidate_limit]
+        log.info(
+            "twelvelabs_search_done",
+            queries=len(queries),
+            raw_hits=raw_hit_count,
+            hits=len(deduped),
+        )
+        capped = deduped[: self.settings.twelvelabs_visual_candidate_limit]
+        if return_raw_hit_count:
+            return capped, raw_hit_count
+        return capped
 
     def analyze_video(
         self,
@@ -369,45 +477,90 @@ class TwelveLabsClient:
         vod_chunk_start: float,
         vod_chunk_end: float,
         upload_chunk_index: int = 0,
-    ) -> list[VisualSegmentResult]:
+    ) -> tuple[list[VisualSegmentResult], dict[str, Any]]:
         """Analyze one uploaded slice; map timestamps to full-VOD time."""
         chunk_duration = max(0.0, vod_chunk_end - vod_chunk_start)
+        diagnostics: dict[str, Any] = {
+            "pegasusWindows": 0,
+            "pegasusSegments": 0,
+            "pegasusErrors": [],
+            "marengoQueries": 0,
+            "marengoRawHits": 0,
+            "marengoSegments": 0,
+            "assetDurationSeconds": None,
+        }
         if chunk_duration <= 0:
-            return []
+            return [], diagnostics
+
+        asset_duration = self._get_asset_duration_seconds(asset_id)
+        diagnostics["assetDurationSeconds"] = asset_duration
+        effective_duration = chunk_duration
+        if asset_duration is not None:
+            effective_duration = min(chunk_duration, asset_duration)
+
+        chunk_audio_peaks = [
+            t - vod_chunk_start
+            for t in context.audio_peak_times
+            if vod_chunk_start <= t < vod_chunk_end
+        ]
+        chunk_chat_peaks = [
+            t - vod_chunk_start
+            for t in context.chat_peak_times
+            if vod_chunk_start <= t < vod_chunk_end
+        ]
 
         chunk_context = TwelveLabsPromptContext(
             vibe=context.vibe,
             language=context.language,
             transcript_summary=context.transcript_summary,
-            duration_seconds=chunk_duration,
+            duration_seconds=effective_duration,
+            audio_peak_times=chunk_audio_peaks,
+            chat_peak_times=chunk_chat_peaks,
         )
-        analyze_windows = self.compute_chunks(chunk_duration)
+        pegasus_max = float(self.settings.twelvelabs_pegasus_chunk_seconds)
+        analyze_windows = self.compute_chunks(
+            effective_duration, max_chunk_seconds=pegasus_max
+        )
+        diagnostics["pegasusWindows"] = len(analyze_windows)
         all_segments: list[VisualSegmentResult] = []
         queries = build_twelvelabs_search_queries(context.vibe)
+        diagnostics["marengoQueries"] = len(queries)
 
         for window in analyze_windows:
             try:
                 pegasus = self.segment_highlights(
-                    asset_id, chunk_context, chunk=window
+                    asset_id,
+                    chunk_context,
+                    chunk=window,
+                    asset_duration_seconds=asset_duration,
                 )
+                diagnostics["pegasusSegments"] += len(pegasus)
                 all_segments.extend(offset_segment_timestamps(pegasus, vod_chunk_start))
             except Exception as exc:
+                err = str(exc)[:500]
+                diagnostics["pegasusErrors"].append(
+                    {"window": window.chunk_index, "error": err}
+                )
                 log.warning(
                     "twelvelabs_pegasus_upload_chunk_failed",
                     upload_chunk_index=upload_chunk_index,
                     window=window.chunk_index,
-                    error=str(exc),
+                    error=err,
                 )
                 if not self.settings.twelvelabs_fail_open:
                     raise
 
             try:
-                marengo = self.search_moments(
+                marengo, raw_hits = self.search_moments(
                     indexed_asset_id,
                     queries,
-                    duration_seconds=chunk_duration,
+                    duration_seconds=effective_duration,
                     chunk=window,
+                    asset_duration_seconds=asset_duration,
+                    return_raw_hit_count=True,
                 )
+                diagnostics["marengoRawHits"] += raw_hits
+                diagnostics["marengoSegments"] += len(marengo)
                 all_segments.extend(offset_segment_timestamps(marengo, vod_chunk_start))
             except Exception as exc:
                 log.warning(
@@ -425,8 +578,11 @@ class TwelveLabsClient:
             vod_start=round(vod_chunk_start, 2),
             vod_end=round(vod_chunk_end, 2),
             segments=len(all_segments),
+            pegasus_windows=len(analyze_windows),
+            pegasus_errors=len(diagnostics["pegasusErrors"]),
+            marengo_raw_hits=diagnostics["marengoRawHits"],
         )
-        return all_segments
+        return all_segments, diagnostics
 
     def delete_or_cleanup(self, indexed_asset_id: str) -> None:
         """Best-effort cleanup of indexed asset — non-fatal."""
@@ -442,7 +598,7 @@ class TwelveLabsClient:
         self,
         task_id: str,
         *,
-        timeout_seconds: float = 1800.0,
+        timeout_seconds: float = 7200.0,
         poll_interval: float = 6.0,
     ) -> dict[str, Any]:
         deadline = time.time() + timeout_seconds

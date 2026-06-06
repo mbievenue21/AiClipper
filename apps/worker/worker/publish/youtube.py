@@ -16,13 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 from pathlib import Path
 
 import httpx
 import structlog
 
+from ..config import get_settings
 from . import UploadResult, Uploader
 from .errors import AuthExpiredError, PublishError
 
@@ -91,8 +91,9 @@ def _category_for_clip() -> str:
 
 
 async def _refresh_access_token(refresh_token: str) -> str:
-    client_id = os.environ.get("YOUTUBE_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip()
+    settings = get_settings()
+    client_id = settings.youtube_client_id.strip()
+    client_secret = settings.youtube_client_secret.strip()
     if not client_id or not client_secret:
         raise AuthExpiredError(
             "Cannot refresh YouTube token — set YOUTUBE_CLIENT_ID and "

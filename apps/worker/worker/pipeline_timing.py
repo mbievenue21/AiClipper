@@ -27,7 +27,6 @@ STAGE_KEYS = frozenset(
         "transcribe",
         "twelvelabs_index",
         "twelvelabs_visual",
-        "pyscene_detect",
         "librosa_audio",
         "chat_density",
         "candidate_generation",

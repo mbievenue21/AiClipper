@@ -95,6 +95,9 @@ export type ProjectSettings = {
    * - "pro": Gemini 3.1 Pro — deepest narrative-arc reasoning for boundaries.
    */
   analyzeModel: AnalyzeModel; // default "flash"
+
+  /** Highlight profile slug or id for profile-based scoring. */
+  highlightProfileId?: string;
 };
 
 export const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
@@ -353,6 +356,13 @@ export type HighlightReason = {
     finalEnd: number;
     reason?: string;
   };
+  /** Profile-based scoring breakdown when highlight profile system is used. */
+  profileScore?: ProfileSignalBreakdown;
+  profileVersionId?: string | null;
+  matchedKeywords?: string[];
+  matchedPhrases?: string[];
+  audioPeakPosition?: number | null;
+  duplicateWarning?: boolean;
 };
 
 /** Segment-level caption override for clip editor / reedit job. */
@@ -597,7 +607,16 @@ export type JobType =
   | "transcribe"
   | "twelvelabs_index"
   | "twelvelabs_analyze"
+  | "feature_extract"
+  | "candidate_generate"
+  | "profile_score"
   | "analyze"
+  | "reference_clip_import"
+  | "reference_feature_extract"
+  | "profile_train"
+  | "profile_evaluate"
+  | "profile_retrain_from_feedback"
+  | "enrich_training_feedback"
   | "render"
   | "caption"
   | "reedit"
@@ -792,6 +811,9 @@ export type PipelineStageKey =
   | "transcribe"
   | "twelvelabs_index"
   | "twelvelabs_visual"
+  | "feature_extract"
+  | "candidate_generate"
+  | "profile_score"
   | "librosa_audio"
   | "chat_density"
   | "candidate_generation"
@@ -809,6 +831,9 @@ export const PIPELINE_STAGE_DEFS: {
   { key: "transcribe", label: "Transcribe", group: "core" },
   { key: "twelvelabs_index", label: "TL index", group: "twelvelabs" },
   { key: "twelvelabs_visual", label: "TL visual", group: "twelvelabs" },
+  { key: "feature_extract", label: "Feature extract", group: "analyze" },
+  { key: "candidate_generate", label: "Candidates", group: "analyze" },
+  { key: "profile_score", label: "Profile score", group: "analyze" },
   { key: "librosa_audio", label: "Librosa audio", group: "analyze" },
   { key: "chat_density", label: "Chat density", group: "analyze" },
   { key: "candidate_generation", label: "Candidates", group: "analyze" },
@@ -874,6 +899,444 @@ export const pipelineStageTimings = sqliteTable(
 );
 
 // ============================================================================
+// RANKING PREFERENCES — learned weights from clip feedback + editor trims
+// ============================================================================
+
+export type SignalVote = "up" | "down" | "skip";
+
+export type RankingWeights = {
+  fusionVisual: number;
+  fusionChat: number;
+  fusionAudio: number;
+  fusionTranscript: number;
+  fusionAlignment: number;
+  fusionScene: number;
+  fusionAgreement: number;
+  candidateAudio: number;
+  candidateChat: number;
+  candidateKeyword: number;
+  candidateChatAudio: number;
+  geminiBlendLlm: number;
+  geminiBlendLocal: number;
+};
+
+export const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
+  fusionVisual: 0.24,
+  fusionChat: 0.18,
+  fusionAudio: 0.16,
+  fusionTranscript: 0.14,
+  fusionAlignment: 0.1,
+  fusionScene: 0.1,
+  fusionAgreement: 0.08,
+  candidateAudio: 0.75,
+  candidateChat: 0.4,
+  candidateKeyword: 0.25,
+  candidateChatAudio: 0.45,
+  geminiBlendLlm: 0.55,
+  geminiBlendLocal: 0.45,
+};
+
+export type ClipSignalVotes = Partial<
+  Record<
+    | "visual"
+    | "audio"
+    | "chat"
+    | "transcript"
+    | "fusion"
+    | "gemini",
+    SignalVote
+  >
+>;
+
+export const rankingPreferences = sqliteTable("ranking_preferences", {
+  id: text("id").primaryKey().default("default"),
+  weightsJson: text("weights_json", { mode: "json" })
+    .$type<RankingWeights>()
+    .notNull(),
+  learnedPreRollSeconds: real("learned_pre_roll_seconds").notNull().default(8),
+  learnedTailPaddingSeconds: real("learned_tail_padding_seconds")
+    .notNull()
+    .default(2),
+  editorPadBeforeSeconds: real("editor_pad_before_seconds").notNull().default(10),
+  editorPadAfterSeconds: real("editor_pad_after_seconds").notNull().default(10),
+  feedbackCount: integer("feedback_count").notNull().default(0),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .default(sql`(unixepoch() * 1000)`),
+});
+
+export const clipFeedback = sqliteTable(
+  "clip_feedback",
+  {
+    id: id(),
+    clipId: text("clip_id")
+      .notNull()
+      .references(() => clips.id, { onDelete: "cascade" }),
+    highlightId: text("highlight_id")
+      .notNull()
+      .references(() => highlights.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    overallVote: text("overall_vote", { enum: ["up", "down"] }),
+    signalVotesJson: text("signal_votes_json", { mode: "json" }).$type<
+      ClipSignalVotes
+    >(),
+    effectivePreRollSeconds: real("effective_pre_roll_seconds"),
+    effectiveTailSeconds: real("effective_tail_seconds"),
+    highlightStartSeconds: real("highlight_start_seconds"),
+    highlightEndSeconds: real("highlight_end_seconds"),
+    sourceStartSeconds: real("source_start_seconds"),
+    sourceEndSeconds: real("source_end_seconds"),
+    reasonSnapshotJson: text("reason_snapshot_json", { mode: "json" }).$type<
+      HighlightReason
+    >(),
+    notes: text("notes"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("clip_feedback_clip_idx").on(t.clipId),
+    index("clip_feedback_project_idx").on(t.projectId),
+  ],
+);
+
+// ============================================================================
+// HIGHLIGHT PROFILE TRAINING SYSTEM
+// Versioned configs that learn content-specific clipping settings.
+// ============================================================================
+
+export type ProfileStatus = "draft" | "training" | "active" | "archived";
+export type ProfileModelType =
+  | "config_only"
+  | "sklearn_ranker"
+  | "lightgbm_ranker"
+  | "xgboost_ranker";
+export type TrainingExampleLabel =
+  | "positive"
+  | "negative"
+  | "rejected"
+  | "accepted"
+  | "published";
+export type TrainingExampleReason =
+  | "reference_clip"
+  | "user_accept"
+  | "user_reject"
+  | "user_trim"
+  | "random_negative"
+  | "adjacent_negative";
+export type ReferenceClipSourceType =
+  | "uploaded_clip"
+  | "youtube_short"
+  | "youtube"
+  | "twitch"
+  | "local_file"
+  | "existing_project_clip";
+export type TrainingRunStatus = "queued" | "running" | "completed" | "failed";
+export type TrainingOptimizer = "optuna" | "grid_search" | "manual";
+
+export type ProfileSignalBreakdown = {
+  audioPeakScore: number;
+  keywordScore: number;
+  semanticPhraseScore: number;
+  chatBurstScore: number;
+  sceneScore: number;
+  ocrScore: number;
+  duplicatePenalty: number;
+  durationPenalty: number;
+  finalScore: number;
+  explanation?: string;
+};
+
+export type ProfileConfig = {
+  metadata: {
+    name: string;
+    slug: string;
+    game?: string;
+    contentType?: string;
+  };
+  candidateSources: {
+    audioPeaks: boolean;
+    transcriptKeywords: boolean;
+    semanticPhrases: boolean;
+    chatBursts: boolean;
+    sceneCuts: boolean;
+    ocrEvents: boolean;
+  };
+  timing: {
+    minDurationSeconds: number;
+    targetDurationSeconds: number;
+    maxDurationSeconds: number;
+    preRollSeconds: number;
+    postRollSeconds: number;
+    mergeWindowSeconds: number;
+    dedupeOverlapThreshold: number;
+  };
+  keywords: Record<string, number>;
+  antiKeywords?: Record<string, number>;
+  phrases: string[];
+  scoreWeights: {
+    audioPeak: number;
+    keyword: number;
+    semanticPhrase: number;
+    chatBurst: number;
+    scene: number;
+    ocr: number;
+  };
+  thresholds: {
+    audioPeakMin: number;
+    chatBurstMin: number;
+    embeddingSimilarityMin: number;
+    sceneCutBonus: number;
+  };
+  penalties: {
+    duplicate: number;
+    tooShort: number;
+    tooLong: number;
+    weakTranscript: number;
+    antiKeyword?: number;
+  };
+  normalization: {
+    audioZScoreCap: number;
+    chatZScoreCap: number;
+  };
+  renderDefaults?: {
+    aspect?: "9:16" | "16:9" | "1:1";
+    preRollSeconds?: number;
+  };
+};
+
+/** User + Gemini-enriched rationale attached to a training example. */
+export type TrainingEditorGeminiEnrichment = {
+  momentType?: string;
+  highlightKeywords?: string[];
+  antiKeywords?: string[];
+  phrases?: string[];
+  whyHighlight?: string;
+  whyNotHighlight?: string;
+  signalHints?: string[];
+  enrichedAt?: number;
+};
+
+export type TrainingEditorNotes = {
+  userKeywords?: string[];
+  userPhrases?: string[];
+  userRationale?: string;
+  userAntiKeywords?: string[];
+  enrichWithGemini?: boolean;
+  gemini?: TrainingEditorGeminiEnrichment;
+};
+
+export type ProfileMetrics = {
+  recallAtK?: number;
+  precisionAtK?: number;
+  meanTemporalIou?: number;
+  acceptanceRate?: number;
+  duplicateRate?: number;
+  durationCompliance?: number;
+  trialCount?: number;
+  bestObjective?: number;
+  trainingRevision?: number;
+  separation?: number;
+  meanPositiveScore?: number;
+  meanNegativeScore?: number;
+};
+
+export const highlightProfiles = sqliteTable(
+  "highlight_profiles",
+  {
+    id: id(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description"),
+    game: text("game"),
+    contentType: text("content_type"),
+    status: text("status").$type<ProfileStatus>().notNull().default("draft"),
+    activeVersionId: text("active_version_id"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("highlight_profiles_slug_unique").on(t.slug)],
+);
+
+export const highlightProfileVersions = sqliteTable(
+  "highlight_profile_versions",
+  {
+    id: id(),
+    profileId: text("profile_id")
+      .notNull()
+      .references(() => highlightProfiles.id, { onDelete: "cascade" }),
+    versionNumber: integer("version_number").notNull(),
+    configJson: text("config_json", { mode: "json" })
+      .$type<ProfileConfig>()
+      .notNull(),
+    modelType: text("model_type").$type<ProfileModelType>().notNull().default("config_only"),
+    modelArtifactPath: text("model_artifact_path"),
+    metricsJson: text("metrics_json", { mode: "json" }).$type<ProfileMetrics>(),
+    trainingDatasetId: text("training_dataset_id"),
+    isActive: integer("is_active", { mode: "boolean" }).notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [index("highlight_profile_versions_profile_idx").on(t.profileId)],
+);
+
+export const trainingDatasets = sqliteTable(
+  "training_datasets",
+  {
+    id: id(),
+    profileId: text("profile_id")
+      .notNull()
+      .references(() => highlightProfiles.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    sourceNotes: text("source_notes"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("training_datasets_profile_idx").on(t.profileId)],
+);
+
+export const referenceClips = sqliteTable(
+  "reference_clips",
+  {
+    id: id(),
+    datasetId: text("dataset_id")
+      .notNull()
+      .references(() => trainingDatasets.id, { onDelete: "cascade" }),
+    sourceType: text("source_type").$type<ReferenceClipSourceType>().notNull(),
+    sourceUrl: text("source_url"),
+    sourceVideoId: text("source_video_id"),
+    filePath: text("file_path").notNull(),
+    title: text("title"),
+    durationSeconds: real("duration_seconds"),
+    startTimeInSource: real("start_time_in_source"),
+    endTimeInSource: real("end_time_in_source"),
+    labelsJson: text("labels_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    metadataJson: text("metadata_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("reference_clips_dataset_idx").on(t.datasetId)],
+);
+
+export const trainingExamples = sqliteTable(
+  "training_examples",
+  {
+    id: id(),
+    datasetId: text("dataset_id")
+      .notNull()
+      .references(() => trainingDatasets.id, { onDelete: "cascade" }),
+    referenceClipId: text("reference_clip_id").references(
+      () => referenceClips.id,
+      { onDelete: "set null" },
+    ),
+    projectId: text("project_id").references(() => projects.id, {
+      onDelete: "set null",
+    }),
+    sourceVideoId: text("source_video_id"),
+    startSeconds: real("start_seconds").notNull(),
+    endSeconds: real("end_seconds").notNull(),
+    label: text("label").$type<TrainingExampleLabel>().notNull(),
+    confidence: real("confidence"),
+    reason: text("reason").$type<TrainingExampleReason>().notNull(),
+    featuresJson: text("features_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("training_examples_dataset_idx").on(t.datasetId),
+    index("training_examples_label_idx").on(t.label),
+  ],
+);
+
+export const extractedFeatureWindows = sqliteTable(
+  "extracted_feature_windows",
+  {
+    id: id(),
+    projectId: text("project_id").references(() => projects.id, {
+      onDelete: "cascade",
+    }),
+    referenceClipId: text("reference_clip_id").references(
+      () => referenceClips.id,
+      { onDelete: "cascade" },
+    ),
+    startSeconds: real("start_seconds").notNull(),
+    endSeconds: real("end_seconds").notNull(),
+    windowSizeSeconds: real("window_size_seconds").notNull(),
+    featuresJson: text("features_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    transcriptText: text("transcript_text"),
+    chatFeaturesJson: text("chat_features_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    audioFeaturesJson: text("audio_features_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    visualFeaturesJson: text("visual_features_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("extracted_feature_windows_project_idx").on(t.projectId),
+    index("extracted_feature_windows_reference_idx").on(t.referenceClipId),
+  ],
+);
+
+export const profileTrainingRuns = sqliteTable(
+  "profile_training_runs",
+  {
+    id: id(),
+    profileId: text("profile_id")
+      .notNull()
+      .references(() => highlightProfiles.id, { onDelete: "cascade" }),
+    datasetId: text("dataset_id")
+      .notNull()
+      .references(() => trainingDatasets.id, { onDelete: "cascade" }),
+    status: text("status").$type<TrainingRunStatus>().notNull().default("queued"),
+    optimizer: text("optimizer").$type<TrainingOptimizer>().notNull().default("optuna"),
+    paramsJson: text("params_json", { mode: "json" }).$type<
+      Record<string, unknown>
+    >(),
+    resultConfigJson: text("result_config_json", { mode: "json" }).$type<
+      ProfileConfig
+    >(),
+    metricsJson: text("metrics_json", { mode: "json" }).$type<ProfileMetrics>(),
+    logsPath: text("logs_path"),
+    createdAt: createdAt(),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+  },
+  (t) => [index("profile_training_runs_profile_idx").on(t.profileId)],
+);
+
+export const profileScoredCandidates = sqliteTable(
+  "profile_scored_candidates",
+  {
+    id: id(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    profileVersionId: text("profile_version_id")
+      .notNull()
+      .references(() => highlightProfileVersions.id, { onDelete: "cascade" }),
+    startSeconds: real("start_seconds").notNull(),
+    endSeconds: real("end_seconds").notNull(),
+    score: real("score").notNull(),
+    signalBreakdownJson: text("signal_breakdown_json", { mode: "json" }).$type<
+      ProfileSignalBreakdown
+    >(),
+    titleSuggestion: text("title_suggestion"),
+    explanation: text("explanation"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("profile_scored_candidates_project_idx").on(t.projectId)],
+);
+
+// ============================================================================
 // Type exports for use throughout the app.
 // ============================================================================
 export type Project = typeof projects.$inferSelect;
@@ -891,3 +1354,13 @@ export type NewScheduledUpload = typeof scheduledUploads.$inferInsert;
 export type TranscriptSegment = typeof transcriptSegments.$inferSelect;
 export type PipelineRun = typeof pipelineRuns.$inferSelect;
 export type PipelineStageTiming = typeof pipelineStageTimings.$inferSelect;
+export type RankingPreferences = typeof rankingPreferences.$inferSelect;
+export type ClipFeedback = typeof clipFeedback.$inferSelect;
+export type HighlightProfile = typeof highlightProfiles.$inferSelect;
+export type HighlightProfileVersion = typeof highlightProfileVersions.$inferSelect;
+export type TrainingDataset = typeof trainingDatasets.$inferSelect;
+export type ReferenceClip = typeof referenceClips.$inferSelect;
+export type TrainingExample = typeof trainingExamples.$inferSelect;
+export type ExtractedFeatureWindow = typeof extractedFeatureWindows.$inferSelect;
+export type ProfileTrainingRun = typeof profileTrainingRuns.$inferSelect;
+export type ProfileScoredCandidate = typeof profileScoredCandidates.$inferSelect;

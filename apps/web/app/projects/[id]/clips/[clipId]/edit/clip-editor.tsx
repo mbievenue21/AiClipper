@@ -25,6 +25,10 @@ import { Button } from "@/components/ui/button";
 import type { CaptionSegmentOverride, ClipCaptionSettings } from "@/lib/db/schema";
 import { mediaUrl } from "@/lib/media";
 import { resolveEditorCaptionSegments } from "@/lib/clips/caption-segments";
+import {
+  computeEditorWindow,
+  initialTrimFromSource,
+} from "@/lib/clips/editor-window";
 
 import { CaptionSegmentList } from "./caption-segment-list";
 import { EditorTimeline } from "./editor-timeline";
@@ -76,7 +80,7 @@ export function ClipEditor({
   projectId,
   clipId,
   title,
-  filePath,
+  sourceVideoPath,
   aspect,
   sourceDuration,
   highlightStart,
@@ -88,11 +92,13 @@ export function ClipEditor({
   storedCaptionSegments,
   transcriptSegments,
   captionStyle,
+  editorPadBefore,
+  editorPadAfter,
 }: {
   projectId: string;
   clipId: string;
   title: string;
-  filePath: string;
+  sourceVideoPath: string;
   aspect: string;
   sourceDuration: number;
   highlightStart: number;
@@ -104,6 +110,8 @@ export function ClipEditor({
   storedCaptionSegments: CaptionSegmentOverride[] | null;
   transcriptSegments: { startSeconds: number; endSeconds: number; text: string }[];
   captionStyle: ClipCaptionSettings | null;
+  editorPadBefore: number;
+  editorPadAfter: number;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [playhead, setPlayhead] = useState(0);
@@ -113,32 +121,71 @@ export function ClipEditor({
   const [saveOpen, setSaveOpen] = useState(false);
   const [peaks, setPeaks] = useState<Peak[]>([]);
 
-  const baseDuration = Math.max(1, highlightEnd - highlightStart);
-
-  const initialState = useMemo<EditorState>(
-    () => ({
-      trimStart: storedTrimStart,
-      trimEnd: storedTrimEnd,
-      captionSegments: resolveEditorCaptionSegments(
-        storedCaptionSegments,
-        transcriptSegments,
+  const editorWindow = useMemo(
+    () =>
+      computeEditorWindow(
         highlightStart,
         highlightEnd,
-        storedTrimStart,
-        storedTrimEnd,
+        sourceDuration,
+        editorPadBefore,
+        editorPadAfter,
+      ),
+    [
+      highlightStart,
+      highlightEnd,
+      sourceDuration,
+      editorPadBefore,
+      editorPadAfter,
+    ],
+  );
+
+  const baseDuration = editorWindow.windowDuration;
+
+  const initialTrim = useMemo(
+    () =>
+      initialTrimFromSource(
+        editorWindow,
+        highlightStart,
+        highlightEnd,
         sourceStart,
         sourceEnd,
+        storedTrimStart,
+        storedTrimEnd,
       ),
-    }),
     [
-      storedTrimStart,
-      storedTrimEnd,
-      storedCaptionSegments,
-      transcriptSegments,
+      editorWindow,
       highlightStart,
       highlightEnd,
       sourceStart,
       sourceEnd,
+      storedTrimStart,
+      storedTrimEnd,
+    ],
+  );
+
+  const initialState = useMemo<EditorState>(
+    () => ({
+      trimStart: initialTrim.trimStart,
+      trimEnd: initialTrim.trimEnd,
+      captionSegments: resolveEditorCaptionSegments(
+        storedCaptionSegments,
+        transcriptSegments,
+        editorWindow.windowStart,
+        editorWindow.windowEnd,
+        initialTrim.trimStart,
+        initialTrim.trimEnd,
+        null,
+        null,
+        true,
+      ),
+    }),
+    [
+      initialTrim.trimStart,
+      initialTrim.trimEnd,
+      storedCaptionSegments,
+      transcriptSegments,
+      editorWindow.windowStart,
+      editorWindow.windowEnd,
     ],
   );
 
@@ -146,8 +193,7 @@ export function ClipEditor({
     entries: [initialState],
     index: 0,
   });
-  // Live trim preview while dragging — avoids pushing dozens of undo steps per
-  // pointermove and prevents historyIdx from racing ahead of history.length.
+
   const [trimDraft, setTrimDraft] = useState<{
     trimStart?: number;
     trimEnd?: number;
@@ -166,12 +212,12 @@ export function ClipEditor({
         ? resolveEditorCaptionSegments(
             committed.captionSegments,
             transcriptSegments,
-            highlightStart,
-            highlightEnd,
+            editorWindow.windowStart,
+            editorWindow.windowEnd,
             trimStart,
             trimEnd,
-            sourceStart,
-            sourceEnd,
+            null,
+            null,
             true,
           )
         : committed.captionSegments,
@@ -180,8 +226,8 @@ export function ClipEditor({
     committed,
     trimDraft,
     transcriptSegments,
-    highlightStart,
-    highlightEnd,
+    editorWindow.windowStart,
+    editorWindow.windowEnd,
   ]);
 
   const effectiveDuration = baseDuration - state.trimStart - state.trimEnd;
@@ -212,12 +258,12 @@ export function ClipEditor({
         captionSegments: resolveEditorCaptionSegments(
           committed.captionSegments,
           transcriptSegments,
-          highlightStart,
-          highlightEnd,
+          editorWindow.windowStart,
+          editorWindow.windowEnd,
           trimStart,
           trimEnd,
-          sourceStart,
-          sourceEnd,
+          null,
+          null,
           true,
         ),
       });
@@ -227,8 +273,8 @@ export function ClipEditor({
     committed,
     pushState,
     transcriptSegments,
-    highlightStart,
-    highlightEnd,
+    editorWindow.windowStart,
+    editorWindow.windowEnd,
   ]);
 
   const setCaptionSegments = (segments: CaptionSegmentOverride[]) => {
@@ -250,24 +296,37 @@ export function ClipEditor({
       .then((data: { peaks?: Peak[] }) => {
         const all = data.peaks ?? [];
         setPeaks(
-          all.filter(
-            (p) => p.t >= highlightStart && p.t <= highlightEnd,
-          ).map((p) => ({ t: p.t - highlightStart, v: p.v })),
+          all
+            .filter(
+              (p) =>
+                p.t >= editorWindow.windowStart &&
+                p.t <= editorWindow.windowEnd,
+            )
+            .map((p) => ({ t: p.t - editorWindow.windowStart, v: p.v })),
         );
       })
       .catch(() => setPeaks([]));
-  }, [projectId, highlightStart, highlightEnd]);
+  }, [projectId, editorWindow.windowStart, editorWindow.windowEnd]);
+
+  const windowStart = editorWindow.windowStart;
 
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
     const onTime = () => {
-      const rel = v.currentTime + state.trimStart;
-      setPlayhead(rel);
+      setPlayhead(v.currentTime - windowStart);
     };
     v.addEventListener("timeupdate", onTime);
     return () => v.removeEventListener("timeupdate", onTime);
-  }, [state.trimStart]);
+  }, [windowStart]);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const t = windowStart + state.trimStart;
+    v.currentTime = t;
+    setPlayhead(state.trimStart);
+  }, [windowStart, state.trimStart]);
 
   const togglePlay = () => {
     const v = videoRef.current;
@@ -276,8 +335,11 @@ export function ClipEditor({
       v.pause();
       setPlaying(false);
     } else {
-      if (v.currentTime < 0.01 || v.currentTime >= effectiveDuration - 0.05) {
-        v.currentTime = 0;
+      const selStart = windowStart + state.trimStart;
+      const selEnd = windowStart + baseDuration - state.trimEnd;
+      if (v.currentTime < selStart - 0.01 || v.currentTime >= selEnd - 0.05) {
+        v.currentTime = selStart;
+        setPlayhead(state.trimStart);
       }
       void v.play();
       setPlaying(true);
@@ -287,13 +349,18 @@ export function ClipEditor({
   const seek = (t: number) => {
     const v = videoRef.current;
     if (!v) return;
-    const rel = Math.max(0, Math.min(effectiveDuration, t - state.trimStart));
-    v.currentTime = rel;
-    setPlayhead(t);
+    const clamped = Math.max(
+      state.trimStart,
+      Math.min(baseDuration - state.trimEnd, t),
+    );
+    v.currentTime = windowStart + clamped;
+    setPlayhead(clamped);
   };
 
   const activeCaption = state.captionSegments.find(
-    (s) => playhead >= s.start && playhead <= s.end,
+    (s) =>
+      playhead - state.trimStart >= s.start &&
+      playhead - state.trimStart <= s.end,
   );
 
   const formatClock = (t: number) => {
@@ -305,7 +372,7 @@ export function ClipEditor({
     return `${pad(h)}:${pad(m)}:${pad(s)}:${pad(f)}`;
   };
 
-  const previewUrl = mediaUrl(filePath);
+  const sourcePreviewUrl = mediaUrl(sourceVideoPath);
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4 p-4 pb-8">
@@ -319,14 +386,23 @@ export function ClipEditor({
         <h1 className="truncate text-lg font-semibold">Edit: {title}</h1>
       </div>
 
+      <p className="text-xs text-muted-foreground">
+        Extended editor: ±{editorPadBefore}s / ±{editorPadAfter}s beyond the
+        highlight window. Drag handles into the padded region to add buildup or
+        reaction tail — saves train your default pre-roll.
+      </p>
+
       <div className="relative overflow-hidden rounded-lg bg-black">
         <video
           ref={videoRef}
-          src={previewUrl ?? undefined}
+          src={sourcePreviewUrl ?? undefined}
           className="mx-auto max-h-[50vh] w-full"
           style={{
             aspectRatio:
               aspect === "9:16" ? "9/16" : aspect === "1:1" ? "1/1" : "16/9",
+          }}
+          onLoadedMetadata={(e) => {
+            e.currentTarget.currentTime = windowStart + state.trimStart;
           }}
           onEnded={() => setPlaying(false)}
         />
@@ -417,6 +493,8 @@ export function ClipEditor({
         playhead={playhead}
         peaks={peaks}
         zoom={zoom}
+        highlightOffsetStart={editorWindow.highlightOffsetStart}
+        highlightOffsetEnd={editorWindow.highlightOffsetEnd}
         onTrimStartChange={previewTrimStart}
         onTrimEndChange={previewTrimEnd}
         onTrimCommit={commitTrim}
@@ -443,6 +521,8 @@ export function ClipEditor({
         clipId={clipId}
         trimStart={state.trimStart}
         trimEnd={state.trimEnd}
+        editorWindowStart={editorWindow.windowStart}
+        editorWindowEnd={editorWindow.windowEnd}
         captionSegments={state.captionSegments}
       />
     </div>

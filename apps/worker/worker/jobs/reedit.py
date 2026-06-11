@@ -76,6 +76,7 @@ async def handle_reedit(job, progress: ProgressReporter) -> dict[str, Any]:
         source_rel = video.file_path
         h_start = float(highlight.start_seconds)
         h_end = float(highlight.end_seconds)
+        video_duration = float(video.duration_seconds or h_end)
         parent_style = {**parent.caption_style, **caption_style_in}
 
         if replace_original:
@@ -100,8 +101,22 @@ async def handle_reedit(job, progress: ProgressReporter) -> dict[str, Any]:
             clip_id = target_clip.id
             parent.is_active = False
 
-    cut_start = h_start + max(0.0, trim_start)
-    cut_end = h_end - max(0.0, trim_end)
+    window_start = payload.get("editor_window_start")
+    window_end = payload.get("editor_window_end")
+    if window_start is not None and window_end is not None:
+        w_start = float(window_start)
+        w_end = float(window_end)
+    else:
+        from ..analyze.ranking_weights import load_ranking_weights
+
+        rw = load_ranking_weights()
+        pad_before = float(payload.get("editor_pad_before", rw.editor_pad_before_seconds))
+        pad_after = float(payload.get("editor_pad_after", rw.editor_pad_after_seconds))
+        w_start = max(0.0, h_start - pad_before)
+        w_end = min(video_duration, h_end + pad_after)
+
+    cut_start = w_start + max(0.0, trim_start)
+    cut_end = w_end - max(0.0, trim_end)
     if cut_end <= cut_start + 1.0:
         raise ValueError("Trim range too short — clip must be at least 1 second.")
 

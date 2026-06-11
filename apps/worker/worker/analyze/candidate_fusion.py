@@ -10,6 +10,7 @@ from .candidates import Candidate
 from .chat_features import ChatDensitySeries
 from .twelvelabs_convert import overlap_ratio
 from ..providers.twelvelabs_types import VisualSegmentResult
+from .ranking_weights import RankingWeights
 
 PENALTY_TYPES = {"commentary_only", "dead_air_or_menu", "menu_or_dead_air"}
 
@@ -157,6 +158,7 @@ def fuse_highlight_candidates(
     scene_cuts: list[float] | None = None,
     min_clip_seconds: float = 20.0,
     max_clip_seconds: float = 60.0,
+    weights: RankingWeights | None = None,
 ) -> list[FusedCandidate]:
     """Merge local + TwelveLabs candidates with weighted fusion scoring."""
     fused: list[FusedCandidate] = [
@@ -270,14 +272,15 @@ def fuse_highlight_candidates(
             cand.visual_peak_at,
         )
 
+        w = weights or RankingWeights()
         fusion = (
-            0.24 * cand.visual_score
-            + 0.18 * cand.chat_score
-            + 0.16 * cand.audio_score
-            + 0.14 * transcript_score
-            + 0.10 * (1.0 - off_center_pen * 4)
-            + 0.10 * scene_score
-            + 0.08 * agreement
+            w.fusion_visual * cand.visual_score
+            + w.fusion_chat * cand.chat_score
+            + w.fusion_audio * cand.audio_score
+            + w.fusion_transcript * transcript_score
+            + w.fusion_alignment * (1.0 - off_center_pen * 4)
+            + w.fusion_scene * scene_score
+            + w.fusion_agreement * agreement
             - commentary_pen
             - dead_air_pen
             - off_center_pen

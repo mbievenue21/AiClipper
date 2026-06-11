@@ -28,7 +28,7 @@ def enqueue_post_transcribe(
     extra_payload: dict[str, Any] | None = None,
     pipeline_run_id: str | None = None,
 ):
-    """Chain TwelveLabs jobs when enabled, otherwise go straight to analyze."""
+    """Chain TwelveLabs when explicitly enabled; default is local profile pipeline."""
     payload: dict[str, Any] = {"project_id": project_id, "video_id": video_id}
     if pipeline_run_id:
         payload["pipeline_run_id"] = pipeline_run_id
@@ -38,7 +38,7 @@ def enqueue_post_transcribe(
     client = TwelveLabsClient()
     if client.enabled():
         return queue.enqueue("twelvelabs_index", payload, project_id=project_id)
-    return queue.enqueue("analyze", payload, project_id=project_id)
+    return queue.enqueue("feature_extract", payload, project_id=project_id)
 
 
 def enqueue_reanalysis(
@@ -66,4 +66,6 @@ def enqueue_reanalysis(
     client = TwelveLabsClient()
     if mode in ("visual_only", "full") and client.enabled():
         return queue.enqueue("twelvelabs_analyze", payload, project_id=project_id)
-    return queue.enqueue("analyze", payload, project_id=project_id)
+    if mode == "local_only":
+        return queue.enqueue("feature_extract", payload, project_id=project_id)
+    return queue.enqueue("feature_extract", payload, project_id=project_id)

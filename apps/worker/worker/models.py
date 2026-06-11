@@ -456,6 +456,58 @@ class HighlightCandidate(Base):
     )
 
 
+class RankingPreferences(Base):
+    __tablename__ = "ranking_preferences"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default="default")
+    weights_json: Mapped[str] = mapped_column(Text, nullable=False)
+    learned_pre_roll_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=8.0)
+    learned_tail_padding_seconds: Mapped[float] = mapped_column(
+        Float, nullable=False, default=2.0
+    )
+    editor_pad_before_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
+    editor_pad_after_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
+    feedback_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+    @property
+    def weights(self) -> dict[str, Any]:
+        if self.weights_json:
+            try:
+                loaded = json.loads(self.weights_json)
+                if isinstance(loaded, dict):
+                    return loaded
+            except json.JSONDecodeError:
+                pass
+        return {}
+
+
+class ClipFeedback(Base):
+    __tablename__ = "clip_feedback"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    clip_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("clips.id", ondelete="CASCADE"), nullable=False
+    )
+    highlight_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("highlights.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    overall_vote: Mapped[str | None] = mapped_column(Text)
+    signal_votes_json: Mapped[str | None] = mapped_column(Text)
+    effective_pre_roll_seconds: Mapped[float | None] = mapped_column(Float)
+    effective_tail_seconds: Mapped[float | None] = mapped_column(Float)
+    highlight_start_seconds: Mapped[float | None] = mapped_column(Float)
+    highlight_end_seconds: Mapped[float | None] = mapped_column(Float)
+    source_start_seconds: Mapped[float | None] = mapped_column(Float)
+    source_end_seconds: Mapped[float | None] = mapped_column(Float)
+    reason_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+
 class Job(Base):
     __tablename__ = "jobs"
 
@@ -516,6 +568,229 @@ class PipelineRun(Base):
     @meta.setter
     def meta(self, value: dict[str, Any]) -> None:
         self.meta_json = json.dumps(value) if value else None
+
+
+class HighlightProfile(Base):
+    __tablename__ = "highlight_profiles"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    game: Mapped[str | None] = mapped_column(Text)
+    content_type: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft")
+    active_version_id: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
+    )
+
+
+class HighlightProfileVersion(Base):
+    __tablename__ = "highlight_profile_versions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    profile_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("highlight_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    model_type: Mapped[str] = mapped_column(Text, nullable=False, default="config_only")
+    model_artifact_path: Mapped[str | None] = mapped_column(Text)
+    metrics_json: Mapped[str | None] = mapped_column(Text)
+    training_dataset_id: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+    @property
+    def config(self) -> dict[str, Any]:
+        try:
+            loaded = json.loads(self.config_json)
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @config.setter
+    def config(self, value: dict[str, Any]) -> None:
+        self.config_json = json.dumps(value)
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        if not self.metrics_json:
+            return {}
+        try:
+            loaded = json.loads(self.metrics_json)
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @metrics.setter
+    def metrics(self, value: dict[str, Any]) -> None:
+        self.metrics_json = json.dumps(value) if value else None
+
+
+class TrainingDataset(Base):
+    __tablename__ = "training_datasets"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    profile_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("highlight_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    source_notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    updated_at: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=_now_ms, onupdate=_now_ms
+    )
+
+
+class ReferenceClip(Base):
+    __tablename__ = "reference_clips"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("training_datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    source_type: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    source_video_id: Mapped[str | None] = mapped_column(Text)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    start_time_in_source: Mapped[float | None] = mapped_column(Float)
+    end_time_in_source: Mapped[float | None] = mapped_column(Float)
+    labels_json: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+
+class TrainingExample(Base):
+    __tablename__ = "training_examples"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("training_datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    reference_clip_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("reference_clips.id", ondelete="SET NULL")
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="SET NULL")
+    )
+    source_video_id: Mapped[str | None] = mapped_column(Text)
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    features_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+    @property
+    def features(self) -> dict[str, Any]:
+        if not self.features_json:
+            return {}
+        try:
+            loaded = json.loads(self.features_json)
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @features.setter
+    def features(self, value: dict[str, Any]) -> None:
+        self.features_json = json.dumps(value) if value else None
+
+
+class ExtractedFeatureWindow(Base):
+    __tablename__ = "extracted_feature_windows"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    project_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    reference_clip_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("reference_clips.id", ondelete="CASCADE")
+    )
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    window_size_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    features_json: Mapped[str | None] = mapped_column(Text)
+    transcript_text: Mapped[str | None] = mapped_column(Text)
+    chat_features_json: Mapped[str | None] = mapped_column(Text)
+    audio_features_json: Mapped[str | None] = mapped_column(Text)
+    visual_features_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+
+
+class ProfileTrainingRun(Base):
+    __tablename__ = "profile_training_runs"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    profile_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("highlight_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("training_datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
+    optimizer: Mapped[str] = mapped_column(Text, nullable=False, default="optuna")
+    params_json: Mapped[str | None] = mapped_column(Text)
+    result_config_json: Mapped[str | None] = mapped_column(Text)
+    metrics_json: Mapped[str | None] = mapped_column(Text)
+    logs_path: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
+    completed_at: Mapped[int | None] = mapped_column(BigInteger)
+
+    @property
+    def result_config(self) -> dict[str, Any]:
+        if not self.result_config_json:
+            return {}
+        try:
+            loaded = json.loads(self.result_config_json)
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @result_config.setter
+    def result_config(self, value: dict[str, Any]) -> None:
+        self.result_config_json = json.dumps(value) if value else None
+
+    @property
+    def metrics(self) -> dict[str, Any]:
+        if not self.metrics_json:
+            return {}
+        try:
+            loaded = json.loads(self.metrics_json)
+            return loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @metrics.setter
+    def metrics(self, value: dict[str, Any]) -> None:
+        self.metrics_json = json.dumps(value) if value else None
+
+
+class ProfileScoredCandidate(Base):
+    __tablename__ = "profile_scored_candidates"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    profile_version_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("highlight_profile_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    signal_breakdown_json: Mapped[str | None] = mapped_column(Text)
+    title_suggestion: Mapped[str | None] = mapped_column(Text)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[int] = mapped_column(BigInteger, nullable=False, default=_now_ms)
 
 
 class PipelineStageTiming(Base):

@@ -1,3 +1,10 @@
+import path from "path";
+
+export function getMediaRoot(): string {
+  const raw = process.env.MEDIA_ROOT ?? "./data/videos";
+  return path.resolve(raw);
+}
+
 /**
  * Helpers for building URLs to media files served by /api/media.
  *

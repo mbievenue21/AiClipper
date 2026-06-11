@@ -33,12 +33,20 @@ import { TranscriptUploadDialog } from "./transcript-upload-dialog";
 import { AnalysisBadges } from "./analysis-badges";
 import { ProjectAnalysisDashboard } from "./analysis-dashboard";
 import { HighlightEvidenceDetails } from "./highlight-evidence";
+import { HighlightFeedbackPanel } from "./highlight-feedback-panel";
 import { getTwelveLabsConfigStatus } from "@/lib/twelvelabs/status";
 import { ReanalyzeDialog } from "./reanalyze-dialog";
 import { DeleteProjectDialog } from "./delete-project-dialog";
 import { PipelineTimingDialog } from "./pipeline-timing-dialog";
 import { PipelineFlowReportPanel } from "./pipeline-flow-report";
 import { getProjectTimingBreakdown } from "@/lib/pipeline/analytics";
+import { getRankingPreferences } from "@/lib/ranking/preferences";
+import {
+  getActiveProfileVersion,
+  getHighlightProfile,
+  getProjectProfileCandidates,
+} from "@/lib/profiles/queries";
+import { ProfileCandidatesPanel } from "./profile-candidates-panel";
 
 export const dynamic = "force-dynamic";
 
@@ -100,6 +108,19 @@ export default async function ProjectPage({ params }: PageProps) {
   const settings: ProjectSettings =
     project.settingsJson ?? DEFAULT_PROJECT_SETTINGS;
 
+  const activeProfile = settings.highlightProfileId
+    ? await getHighlightProfile(settings.highlightProfileId)
+    : null;
+  const activeProfileVersion = activeProfile
+    ? await getActiveProfileVersion(activeProfile.id)
+    : null;
+  const profileVersionFromReport =
+    project.pipelineReportJson?.stages?.profile_score?.profileVersionId;
+
+  const profileCandidates = settings.highlightProfileId
+    ? await getProjectProfileCandidates(id)
+    : [];
+
   const videos = await db
     .select()
     .from(schema.videos)
@@ -154,6 +175,27 @@ export default async function ProjectPage({ params }: PageProps) {
       : [];
 
   const clipIds = clips.map((c) => c.id);
+  const rankingPrefs = await getRankingPreferences();
+  const feedbackRows =
+    clipIds.length > 0
+      ? await db
+          .select({
+            clipId: schema.clipFeedback.clipId,
+            overallVote: schema.clipFeedback.overallVote,
+            signalVotesJson: schema.clipFeedback.signalVotesJson,
+          })
+          .from(schema.clipFeedback)
+          .where(inArray(schema.clipFeedback.clipId, clipIds))
+      : [];
+  const feedbackClipIds = new Set(
+    feedbackRows
+      .filter((r) => {
+        if (r.overallVote) return true;
+        const votes = r.signalVotesJson as Record<string, string> | null;
+        return votes != null && Object.keys(votes).length > 0;
+      })
+      .map((r) => r.clipId),
+  );
   const uploads =
     clipIds.length > 0
       ? await db
@@ -272,6 +314,14 @@ export default async function ProjectPage({ params }: PageProps) {
       versions,
       activeJob: activeJobByClip.get(primary.id) ?? null,
       uploads: clipUploads,
+      highlightStart: highlight?.startSeconds ?? 0,
+      highlightEnd: highlight?.endSeconds ?? 0,
+      sourceStart: primary.sourceStartSeconds,
+      sourceEnd: primary.sourceEndSeconds,
+      reason: (highlight?.reasonJson as HighlightReason) ?? null,
+      learnedPreRoll: rankingPrefs.learnedPreRollSeconds,
+      feedbackCount: rankingPrefs.feedbackCount,
+      hasFeedback: feedbackClipIds.has(primary.id),
     });
   }
 
@@ -571,6 +621,26 @@ export default async function ProjectPage({ params }: PageProps) {
         }
       />
 
+      {settings.highlightProfileId && profileCandidates.length > 0 && (
+        <Card className="mb-4 scroll-mt-28">
+          <CardHeader>
+            <CardTitle className="text-base">Profile-scored windows</CardTitle>
+            <CardDescription>
+              Top windows ranked by{" "}
+              <strong>{activeProfile?.name ?? "highlight profile"}</strong> before
+              Gemini reranking. Rate good/bad examples to improve future runs.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ProfileCandidatesPanel
+              projectId={id}
+              profileId={settings.highlightProfileId}
+              candidates={profileCandidates}
+            />
+          </CardContent>
+        </Card>
+      )}
+
       {highlights.length > 0 && (
         <Card className="mb-4 scroll-mt-28">
           <CardHeader>
@@ -578,10 +648,24 @@ export default async function ProjectPage({ params }: PageProps) {
               <div className="min-w-0">
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Sparkles className="size-4" />
-                  Highlight candidates
+                  Final highlights
                 </CardTitle>
                 <CardDescription>
                   {highlights.length} clip{highlights.length === 1 ? "" : "s"} picked.
+                  {activeProfile && (
+                    <>
+                      {" "}
+                      Profile: <strong>{activeProfile.name}</strong>
+                      {activeProfileVersion
+                        ? ` v${activeProfileVersion.versionNumber}`
+                        : ""}
+                      {profileVersionFromReport &&
+                      profileVersionFromReport !== activeProfileVersion?.id
+                        ? ` (run: ${String(profileVersionFromReport).slice(0, 8)}…)`
+                        : ""}
+                      .
+                    </>
+                  )}{" "}
                   Click <strong>Render</strong> on any of them to cut the final
                   vertical video and (optionally) burn in captions.
                 </CardDescription>
@@ -672,6 +756,15 @@ export default async function ProjectPage({ params }: PageProps) {
                       <HighlightEvidenceDetails reason={reason} />
                     </>
                   )}
+                  <HighlightFeedbackPanel
+                    projectId={id}
+                    highlightId={h.id}
+                    startSeconds={h.startSeconds}
+                    endSeconds={h.endSeconds}
+                    profileId={settings.highlightProfileId}
+                    reason={reason}
+                    currentStatus={h.status}
+                  />
                   <div className="mt-3 flex justify-end">
                     <RenderHighlightButton
                       projectId={id}

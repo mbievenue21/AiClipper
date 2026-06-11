@@ -40,6 +40,29 @@ export function HighlightEvidenceDetails({
       value: penalties.offCenterPeak.toFixed(2),
     });
 
+  const ps = reason.profileScore;
+  if (ps) {
+    rows.push({ label: "Profile score", value: `${(ps.finalScore * 100).toFixed(0)}` });
+    rows.push({ label: "Audio peak", value: `${(ps.audioPeakScore * 100).toFixed(0)}` });
+    rows.push({ label: "Keywords", value: `${(ps.keywordScore * 100).toFixed(0)}` });
+    rows.push({ label: "Phrases", value: `${(ps.semanticPhraseScore * 100).toFixed(0)}` });
+    rows.push({ label: "Chat burst", value: `${(ps.chatBurstScore * 100).toFixed(0)}` });
+    if (ps.explanation) rows.push({ label: "Why", value: ps.explanation });
+  }
+  if (reason.matchedKeywords?.length)
+    rows.push({ label: "Matched keywords", value: reason.matchedKeywords.join(", ") });
+  if (reason.matchedPhrases?.length)
+    rows.push({ label: "Matched phrases", value: reason.matchedPhrases.join(", ") });
+  if (reason.audioPeakPosition != null)
+    rows.push({
+      label: "Audio peak position",
+      value: `${reason.audioPeakPosition.toFixed(1)}s from start`,
+    });
+  if (reason.duplicateWarning)
+    rows.push({ label: "Duplicate warning", value: "Near-overlap with another candidate" });
+  if (reason.profileVersionId)
+    rows.push({ label: "Profile version", value: reason.profileVersionId });
+
   if (rows.length === 0) return null;
 
   return (

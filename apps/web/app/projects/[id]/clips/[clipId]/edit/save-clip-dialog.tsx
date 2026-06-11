@@ -25,6 +25,8 @@ export function SaveClipDialog({
   clipId,
   trimStart,
   trimEnd,
+  editorWindowStart,
+  editorWindowEnd,
   captionSegments,
 }: {
   open: boolean;
@@ -33,6 +35,8 @@ export function SaveClipDialog({
   clipId: string;
   trimStart: number;
   trimEnd: number;
+  editorWindowStart: number;
+  editorWindowEnd: number;
   captionSegments: CaptionSegmentOverride[];
 }) {
   const router = useRouter();
@@ -47,6 +51,8 @@ export function SaveClipDialog({
         clipId,
         trimStart,
         trimEnd,
+        editorWindowStart,
+        editorWindowEnd,
         captionSegments,
         replaceOriginal,
       });

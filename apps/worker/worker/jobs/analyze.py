@@ -12,6 +12,7 @@ import structlog
 from sqlalchemy import select
 
 from ..analyze import AnalysisInput, analyze_project
+from ..analyze.ranking_weights import load_ranking_weights
 from ..analyze.candidates import Segment
 from ..analyze.chat_features import iter_existing_events, parse_twitch_chat
 from ..config import get_settings
@@ -24,12 +25,14 @@ from ..models import (
     ChatFeatures,
     ExternalVideoIndex,
     Highlight,
+    ProfileScoredCandidate,
     Project,
     Transcript,
     TranscriptSegment,
     Video,
     VisualSegment,
 )
+from ..profile.bridge import scored_rows_to_candidates
 from ..providers.twelvelabs_types import VisualSegmentResult
 from .handlers import ProgressReporter, register
 
@@ -160,6 +163,18 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
             r.status == "ready" for r in twelvelabs_index_rows
         )
 
+        profile_scored_rows = (
+            session.execute(
+                select(ProfileScoredCandidate)
+                .where(ProfileScoredCandidate.project_id == project_id)
+                .order_by(ProfileScoredCandidate.score.desc())
+            )
+            .scalars()
+            .all()
+            if payload.get("profile_scored")
+            else []
+        )
+
         _set_project_status(session, project, "analyzing")
 
     visual_segments = [
@@ -216,6 +231,16 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         else str(settings.get("vibe", "") or "")
     )
 
+    ranking_weights = load_ranking_weights()
+    pre_scored = (
+        scored_rows_to_candidates(profile_scored_rows, segments)
+        if profile_scored_rows
+        else None
+    )
+    profile_version_id = payload.get("profile_version_id")
+    if pre_scored and profile_scored_rows:
+        profile_version_id = profile_scored_rows[0].profile_version_id
+
     analysis_input = AnalysisInput(
         audio_path=audio_abs,
         duration_seconds=duration,
@@ -226,13 +251,22 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         min_clip_seconds=float(settings.get("minClipSeconds", 20)),
         max_clip_seconds=float(settings.get("maxClipSeconds", 60)),
         vibe=chosen_vibe,
-        pre_roll_seconds=float(settings.get("preRollSeconds", 8)),
-        tail_padding_seconds=float(settings.get("tailPaddingSeconds", 2)),
+        pre_roll_seconds=float(
+            settings.get("preRollSeconds", ranking_weights.learned_pre_roll_seconds)
+        ),
+        tail_padding_seconds=float(
+            settings.get(
+                "tailPaddingSeconds", ranking_weights.learned_tail_padding_seconds
+            )
+        ),
         analyze_model=chosen_model,
         source_video_path=source_video_abs,
         scene_cuts=[],
         visual_segments=visual_segments or None,
         twelvelabs_used=twelvelabs_used,
+        ranking_weights=ranking_weights,
+        pre_scored_candidates=pre_scored,
+        profile_version_id=str(profile_version_id) if profile_version_id else None,
     )
 
     try:
@@ -340,6 +374,8 @@ async def handle_analyze(job, progress: ProgressReporter) -> dict[str, Any]:
         data={
             "status": "ok",
             "fusionUsed": result.fusion_used,
+            "profileScored": bool(pre_scored),
+            "profileVersionId": profile_version_id,
             "twelvelabsUsed": twelvelabs_used,
             "visualSegmentCount": len(visual_segments),
             "localCandidateCount": result.local_candidate_count,

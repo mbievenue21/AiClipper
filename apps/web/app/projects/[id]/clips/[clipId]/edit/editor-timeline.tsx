@@ -11,6 +11,8 @@ export function EditorTimeline({
   playhead,
   peaks,
   zoom,
+  highlightOffsetStart,
+  highlightOffsetEnd,
   onTrimStartChange,
   onTrimEndChange,
   onTrimCommit,
@@ -22,6 +24,8 @@ export function EditorTimeline({
   playhead: number;
   peaks: Peak[];
   zoom: number;
+  highlightOffsetStart?: number;
+  highlightOffsetEnd?: number;
   onTrimStartChange: (v: number) => void;
   onTrimEndChange: (v: number) => void;
   /** Called when a trim-handle drag ends — commit one undo step. */
@@ -77,6 +81,16 @@ export function EditorTimeline({
   const trimEndRatio = duration > 0 ? trimEnd / duration : 0;
   const selectionLeft = trimStartRatio * 100;
   const selectionWidth = (1 - trimStartRatio - trimEndRatio) * 100;
+  const highlightLeft =
+    duration > 0 && highlightOffsetStart != null
+      ? (highlightOffsetStart / duration) * 100
+      : null;
+  const highlightWidth =
+    duration > 0 &&
+    highlightOffsetStart != null &&
+    highlightOffsetEnd != null
+      ? ((highlightOffsetEnd - highlightOffsetStart) / duration) * 100
+      : null;
 
   const waveform = peaks.length
     ? peaks
@@ -123,6 +137,14 @@ export function EditorTimeline({
             );
           })}
         </svg>
+
+        {highlightLeft != null && highlightWidth != null && (
+          <div
+            className="pointer-events-none absolute inset-y-0 border-x border-dashed border-amber-500/50 bg-amber-500/5"
+            style={{ left: `${highlightLeft}%`, width: `${highlightWidth}%` }}
+            title="Original highlight window"
+          />
+        )}
 
         <div
           className="absolute inset-y-0 border-x-2 border-primary bg-primary/10"

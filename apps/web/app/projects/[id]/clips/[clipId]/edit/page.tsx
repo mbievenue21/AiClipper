@@ -8,6 +8,8 @@ import {
   type ClipCaptionSettings,
 } from "@/lib/db/schema";
 
+import { getRankingPreferences } from "@/lib/ranking/preferences";
+
 import { ClipEditor } from "./clip-editor";
 
 export const dynamic = "force-dynamic";
@@ -63,13 +65,14 @@ export default async function ClipEditPage({ params }: PageProps) {
     : [];
 
   const storedSegments = (clip.captionSegmentsJson as CaptionSegmentOverride[] | null) ?? null;
+  const prefs = await getRankingPreferences();
 
   return (
     <ClipEditor
       projectId={projectId}
       clipId={clipId}
       title={highlight.title ?? "Clip"}
-      filePath={clip.filePath}
+      sourceVideoPath={video.filePath}
       aspect={clip.aspect}
       sourceDuration={video.durationSeconds ?? highlight.endSeconds}
       highlightStart={highlight.startSeconds}
@@ -87,6 +90,8 @@ export default async function ClipEditPage({ params }: PageProps) {
       captionStyle={
         (clip.captionStyleJson as ClipCaptionSettings) ?? DEFAULT_CAPTION_SETTINGS
       }
+      editorPadBefore={prefs.editorPadBeforeSeconds}
+      editorPadAfter={prefs.editorPadAfterSeconds}
     />
   );
 }

@@ -1,9 +1,18 @@
 """Job handlers — import submodules so @register decorators run."""
 
 from . import analyze as _analyze  # noqa: F401
+from . import candidate_generate as _candidate_generate  # noqa: F401
+from . import enrich_training_feedback as _enrich_training_feedback  # noqa: F401
 from . import caption as _caption  # noqa: F401
+from . import feature_extract as _feature_extract  # noqa: F401
 from . import ingest as _ingest  # noqa: F401
+from . import profile_evaluate as _profile_evaluate  # noqa: F401
+from . import profile_retrain_from_feedback as _profile_retrain_from_feedback  # noqa: F401
+from . import profile_score as _profile_score  # noqa: F401
+from . import profile_train as _profile_train  # noqa: F401
 from . import publish as _publish  # noqa: F401
+from . import reference_clip_import as _reference_clip_import  # noqa: F401
+from . import reference_feature_extract as _reference_feature_extract  # noqa: F401
 from . import reedit as _reedit  # noqa: F401
 from . import render as _render  # noqa: F401
 from . import transcribe as _transcribe  # noqa: F401

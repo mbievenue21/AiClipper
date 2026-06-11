@@ -14,11 +14,21 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { DEFAULT_PROJECT_SETTINGS } from "@/lib/db/schema";
+import { DEFAULT_PROJECT_SETTINGS, type HighlightProfile } from "@/lib/db/schema";
 
 const initial: CreateProjectState = {};
 
-export function CreateProjectForm() {
+export function CreateProjectForm({
+  defaultPreRollSeconds = DEFAULT_PROJECT_SETTINGS.preRollSeconds,
+  defaultTailPaddingSeconds = DEFAULT_PROJECT_SETTINGS.tailPaddingSeconds,
+  feedbackCount = 0,
+  profiles = [],
+}: {
+  defaultPreRollSeconds?: number;
+  defaultTailPaddingSeconds?: number;
+  feedbackCount?: number;
+  profiles?: HighlightProfile[];
+}) {
   const [state, action, pending] = useActionState(createProject, initial);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
@@ -168,12 +178,19 @@ export function CreateProjectForm() {
                     type="number"
                     min={0}
                     max={20}
-                    defaultValue={DEFAULT_PROJECT_SETTINGS.preRollSeconds}
+                    defaultValue={defaultPreRollSeconds}
                     disabled={pending}
                   />
                   <p className="text-xs text-muted-foreground">
                     Seconds of context before the climax. 5–15s helps game
                     clips & punchlines land. 0 disables.
+                    {feedbackCount > 0 && (
+                      <>
+                        {" "}
+                        Learned from {feedbackCount} clip edit
+                        {feedbackCount === 1 ? "" : "s"}.
+                      </>
+                    )}
                   </p>
                 </div>
                 <div className="space-y-2">
@@ -186,7 +203,7 @@ export function CreateProjectForm() {
                     type="number"
                     min={0}
                     max={10}
-                    defaultValue={DEFAULT_PROJECT_SETTINGS.tailPaddingSeconds}
+                    defaultValue={defaultTailPaddingSeconds}
                     disabled={pending}
                   />
                   <p className="text-xs text-muted-foreground">
@@ -194,6 +211,34 @@ export function CreateProjectForm() {
                   </p>
                 </div>
               </div>
+
+              {profiles.length > 0 && (
+                <div className="space-y-2">
+                  <label htmlFor="highlightProfileId" className="text-sm font-medium">
+                    Highlight profile
+                  </label>
+                  <select
+                    id="highlightProfileId"
+                    name="highlightProfileId"
+                    defaultValue={
+                      profiles.find((p) => p.slug === "valorant_reaction_shorts")
+                        ?.id ?? profiles[0]?.id
+                    }
+                    disabled={pending}
+                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-xs text-muted-foreground">
+                    Profile config drives candidate scoring — weights, keywords,
+                    and timing rules.
+                  </p>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <label htmlFor="analyzeModel" className="text-sm font-medium">

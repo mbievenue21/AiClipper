@@ -16,6 +16,7 @@ import {
   stageMedians,
 } from "@/lib/pipeline/analytics";
 import { PIPELINE_STAGE_DEFS } from "@/lib/db/schema";
+import { getProfileAnalyticsOverview } from "@/lib/profiles/queries";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +24,7 @@ export const dynamic = "force-dynamic";
 export default async function AnalyticsPage() {
   const rows = getAnalyticsOverview();
   const medians = stageMedians(rows);
+  const profileAnalytics = await getProfileAnalyticsOverview();
 
   const globalBottleneck = (() => {
     let best: { key: string; label: string; total: number } | null = null;
@@ -215,6 +217,73 @@ export default async function AnalyticsPage() {
                   </tr>
                 </tbody>
               </table>
+            </CardContent>
+          </Card>
+
+          <Card className="mt-6">
+            <CardHeader>
+              <CardTitle>Profile training metrics</CardTitle>
+              <CardDescription>
+                How highlight profiles are learning from reference clips and
+                feedback.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="rounded-md border p-4">
+                  <p className="text-xs text-muted-foreground">Profiles</p>
+                  <p className="text-2xl font-semibold">
+                    {profileAnalytics.profiles.length}
+                  </p>
+                </div>
+                <div className="rounded-md border p-4">
+                  <p className="text-xs text-muted-foreground">Training runs</p>
+                  <p className="text-2xl font-semibold">
+                    {profileAnalytics.runs.length}
+                  </p>
+                </div>
+                <div className="rounded-md border p-4">
+                  <p className="text-xs text-muted-foreground">Examples</p>
+                  <p className="text-2xl font-semibold">
+                    {profileAnalytics.examples.length}
+                  </p>
+                </div>
+              </div>
+
+              {profileAnalytics.profiles.length > 0 && (
+                <div className="space-y-2">
+                  {profileAnalytics.profiles.map((p) => {
+                    const runs = profileAnalytics.runs.filter(
+                      (r) => r.profileId === p.id,
+                    );
+                    const latest = runs[0];
+                    return (
+                      <div
+                        key={p.id}
+                        className="flex items-center justify-between rounded-md border p-3 text-sm"
+                      >
+                        <div>
+                          <Link
+                            href={`/profiles/${p.id}#training-board`}
+                            className="font-medium hover:underline"
+                          >
+                            {p.name}
+                          </Link>
+                          <p className="text-xs text-muted-foreground">
+                            {latest?.status ?? "no runs"} ·{" "}
+                            {latest?.metricsJson?.trialCount ?? 0} trials
+                          </p>
+                        </div>
+                        {latest?.metricsJson?.recallAtK != null && (
+                          <Badge variant="secondary">
+                            recall@K {(latest.metricsJson.recallAtK * 100).toFixed(0)}%
+                          </Badge>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </CardContent>
           </Card>
         </>

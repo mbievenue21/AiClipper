@@ -28,6 +28,19 @@ import {
 import { hasYouTubeAccount, YouTubeClientError } from "@/lib/youtube/client";
 import { sanitizeYouTubeTags } from "@/lib/youtube/tags";
 import { parseTranscript, TranscriptParseError } from "@/lib/transcripts/parse";
+import {
+  computeEditorWindow,
+  sourceCutFromTrim,
+} from "@/lib/clips/editor-window";
+import {
+  getRankingPreferences,
+  recordClipFeedback,
+} from "@/lib/ranking/preferences";
+import {
+  recordCandidateFeedback,
+  recordHighlightFeedback,
+} from "@/lib/profiles/feedback";
+import type { ClipSignalVotes, HighlightReason } from "@/lib/db/schema";
 
 const captionStyleSchema = z.object({
   font: z
@@ -183,6 +196,8 @@ const saveClipEditSchema = z.object({
   clipId: z.string().min(1),
   trimStart: z.number().min(0),
   trimEnd: z.number().min(0),
+  editorWindowStart: z.number().min(0),
+  editorWindowEnd: z.number().positive(),
   captionSegments: z.array(captionSegmentSchema),
   replaceOriginal: z.boolean(),
 });
@@ -195,6 +210,8 @@ export async function saveClipEditAction(input: {
   clipId: string;
   trimStart: number;
   trimEnd: number;
+  editorWindowStart: number;
+  editorWindowEnd: number;
   captionSegments: CaptionSegmentOverride[];
   replaceOriginal: boolean;
 }) {
@@ -216,7 +233,29 @@ export async function saveClipEditAction(input: {
     return { ok: false as const, message: "Clip not found." };
   }
 
+  const highlight = db
+    .select()
+    .from(schema.highlights)
+    .where(eq(schema.highlights.id, clip.highlightId))
+    .limit(1)
+    .all()[0];
+  if (!highlight) {
+    return { ok: false as const, message: "Highlight not found." };
+  }
+
   const style = (clip.captionStyleJson as ClipCaptionSettings) ?? DEFAULT_CAPTION_SETTINGS;
+  const prefs = await getRankingPreferences();
+  const { cutStart, cutEnd } = sourceCutFromTrim(
+    {
+      windowStart: parsed.data.editorWindowStart,
+      windowEnd: parsed.data.editorWindowEnd,
+      windowDuration: parsed.data.editorWindowEnd - parsed.data.editorWindowStart,
+      highlightOffsetStart: 0,
+      highlightOffsetEnd: 0,
+    },
+    parsed.data.trimStart,
+    parsed.data.trimEnd,
+  );
 
   try {
     await enqueueJob({
@@ -227,6 +266,10 @@ export async function saveClipEditAction(input: {
         clip_id: parsed.data.clipId,
         trim_start: parsed.data.trimStart,
         trim_end: parsed.data.trimEnd,
+        editor_window_start: parsed.data.editorWindowStart,
+        editor_window_end: parsed.data.editorWindowEnd,
+        editor_pad_before: prefs.editorPadBeforeSeconds,
+        editor_pad_after: prefs.editorPadAfterSeconds,
         caption_segments: parsed.data.captionSegments,
         caption_style: style,
         replace_original: parsed.data.replaceOriginal,
@@ -235,6 +278,21 @@ export async function saveClipEditAction(input: {
           ? null
           : `Edited ${new Date().toLocaleString()}`,
       },
+    });
+
+    await recordClipFeedback({
+      clipId: parsed.data.clipId,
+      highlightId: highlight.id,
+      projectId: parsed.data.projectId,
+      highlightStart: highlight.startSeconds,
+      highlightEnd: highlight.endSeconds,
+      sourceStart: cutStart,
+      sourceEnd: cutEnd,
+      reason: (highlight.reasonJson as HighlightReason) ?? null,
+      notes: "editor_trim_save",
+      applyLearning: true,
+      signalVotes: {},
+      overallVote: undefined,
     });
   } catch (err) {
     return {
@@ -245,6 +303,156 @@ export async function saveClipEditAction(input: {
 
   revalidatePath(`/projects/${parsed.data.projectId}`);
   return { ok: true as const, message: "Re-edit job queued." };
+}
+
+const clipFeedbackSchema = z.object({
+  projectId: z.string().min(1),
+  clipId: z.string().min(1),
+  highlightId: z.string().min(1),
+  overallVote: z.enum(["up", "down"]).optional(),
+  signalVotes: z
+    .record(z.string(), z.enum(["up", "down", "skip"]))
+    .optional(),
+  highlightStart: z.number(),
+  highlightEnd: z.number(),
+  sourceStart: z.number().nullable().optional(),
+  sourceEnd: z.number().nullable().optional(),
+  reason: z.any().optional(),
+});
+
+export async function submitProfileCandidateFeedbackAction(input: {
+  projectId: string;
+  profileId?: string | null;
+  startSeconds: number;
+  endSeconds: number;
+  vote: "accepted" | "rejected";
+  breakdown?: Record<string, unknown> | null;
+  editorNotes?: import("@/lib/db/schema").TrainingEditorNotes;
+}) {
+  try {
+    const result = await recordCandidateFeedback({
+      projectId: input.projectId,
+      profileId: input.profileId,
+      startSeconds: input.startSeconds,
+      endSeconds: input.endSeconds,
+      label: input.vote,
+      breakdown: input.breakdown ?? undefined,
+      editorNotes: input.editorNotes,
+      autoRetrain: true,
+    });
+    revalidatePath(`/projects/${input.projectId}`);
+    if (!result.stored) {
+      return {
+        ok: false as const,
+        message: "No highlight profile configured for this project.",
+      };
+    }
+    return { ok: true as const, message: "Feedback saved for profile training." };
+  } catch (err) {
+    return {
+      ok: false as const,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function submitHighlightFeedbackAction(input: {
+  projectId: string;
+  highlightId: string;
+  profileId?: string | null;
+  startSeconds: number;
+  endSeconds: number;
+  vote: "accepted" | "rejected";
+  reason?: HighlightReason | null;
+  editorNotes?: import("@/lib/db/schema").TrainingEditorNotes;
+}) {
+  try {
+    const result = await recordHighlightFeedback({
+      projectId: input.projectId,
+      highlightId: input.highlightId,
+      profileId: input.profileId,
+      startSeconds: input.startSeconds,
+      endSeconds: input.endSeconds,
+      label: input.vote,
+      reasonSnapshot: input.reason ?? null,
+      editorNotes: input.editorNotes,
+      autoRetrain: true,
+    });
+    revalidatePath(`/projects/${input.projectId}`);
+    if (!result.stored) {
+      return {
+        ok: false as const,
+        message: "No highlight profile configured for this project.",
+      };
+    }
+    return { ok: true as const, message: "Feedback saved for profile training." };
+  } catch (err) {
+    return {
+      ok: false as const,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function submitClipFeedbackAction(input: {
+  projectId: string;
+  clipId: string;
+  highlightId: string;
+  overallVote?: "up" | "down";
+  signalVotes?: ClipSignalVotes;
+  highlightStart: number;
+  highlightEnd: number;
+  sourceStart?: number | null;
+  sourceEnd?: number | null;
+  reason?: HighlightReason | null;
+}) {
+  const parsed = clipFeedbackSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      ok: false as const,
+      message: parsed.error.issues.map((i) => i.message).join("; "),
+    };
+  }
+
+  try {
+    const result = await recordClipFeedback({
+      clipId: parsed.data.clipId,
+      highlightId: parsed.data.highlightId,
+      projectId: parsed.data.projectId,
+      overallVote: parsed.data.overallVote,
+      signalVotes: (parsed.data.signalVotes ?? {}) as ClipSignalVotes,
+      highlightStart: parsed.data.highlightStart,
+      highlightEnd: parsed.data.highlightEnd,
+      sourceStart: parsed.data.sourceStart ?? undefined,
+      sourceEnd: parsed.data.sourceEnd ?? undefined,
+      reason: (parsed.data.reason as HighlightReason) ?? null,
+    });
+    revalidatePath(`/projects/${parsed.data.projectId}`);
+
+    if (parsed.data.overallVote) {
+      await recordHighlightFeedback({
+        projectId: parsed.data.projectId,
+        highlightId: parsed.data.highlightId,
+        startSeconds:
+          parsed.data.sourceStart ?? parsed.data.highlightStart,
+        endSeconds: parsed.data.sourceEnd ?? parsed.data.highlightEnd,
+        label: parsed.data.overallVote === "up" ? "accepted" : "rejected",
+        reasonSnapshot: (parsed.data.reason as HighlightReason) ?? null,
+        autoRetrain: true,
+      }).catch(() => undefined);
+    }
+
+    return {
+      ok: true as const,
+      learnedPreRoll: result.learnedPreRollSeconds,
+      learnedTail: result.learnedTailPaddingSeconds,
+    };
+  } catch (err) {
+    return {
+      ok: false as const,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 // -------------------------------------------------------------------------

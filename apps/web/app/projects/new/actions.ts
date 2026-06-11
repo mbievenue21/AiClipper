@@ -33,6 +33,7 @@ function parseSettings(formData: FormData): ProjectSettings {
     analyzeModel: String(
       formData.get("analyzeModel") ?? DEFAULT_PROJECT_SETTINGS.analyzeModel,
     ),
+    highlightProfileId: String(formData.get("highlightProfileId") ?? "").trim(),
   };
 
   const topN = Math.max(1, Math.min(20, Math.floor(raw.topN || 3)));
@@ -62,7 +63,7 @@ function parseSettings(formData: FormData): ProjectSettings {
     ? (raw.analyzeModel as ProjectSettings["analyzeModel"])
     : DEFAULT_PROJECT_SETTINGS.analyzeModel;
 
-  return {
+  const settings: ProjectSettings = {
     topN,
     minClipSeconds: minClip,
     maxClipSeconds: maxClip,
@@ -72,6 +73,10 @@ function parseSettings(formData: FormData): ProjectSettings {
     tailPaddingSeconds,
     analyzeModel,
   };
+  if (raw.highlightProfileId) {
+    settings.highlightProfileId = raw.highlightProfileId.slice(0, 80);
+  }
+  return settings;
 }
 
 export async function createProject(

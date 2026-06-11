@@ -32,12 +32,20 @@ export default async function HomePage() {
             Paste a YouTube or Twitch VOD URL to start extracting highlights.
           </p>
         </div>
-        <Button asChild>
-          <Link href="/projects/new">
-            <Plus className="size-4" />
-            New project
-          </Link>
-        </Button>
+        <div className="flex gap-2">
+          <Button asChild variant="outline">
+            <Link href="/train">
+              <Sparkles className="size-4" />
+              Train profile
+            </Link>
+          </Button>
+          <Button asChild>
+            <Link href="/projects/new">
+              <Plus className="size-4" />
+              New project
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {projects.length === 0 ? (

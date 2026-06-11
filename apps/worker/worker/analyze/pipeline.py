@@ -18,6 +18,7 @@ from .candidate_fusion import fuse_highlight_candidates
 from .gemini import LlmPick, is_configured as gemini_configured, rerank_with_gemini
 from .gemini_multimodal import is_multimodal_enabled, refine_boundaries_multimodal
 from ..providers.twelvelabs_types import VisualSegmentResult
+from .ranking_weights import RankingWeights
 
 log = structlog.get_logger(__name__)
 
@@ -42,6 +43,9 @@ class AnalysisInput:
     scene_cuts: list[float] | None = None
     visual_segments: list[VisualSegmentResult] | None = None
     twelvelabs_used: bool = False
+    ranking_weights: RankingWeights | None = None
+    pre_scored_candidates: list[Candidate] | None = None
+    profile_version_id: str | None = None
 
 
 @dataclass
@@ -94,6 +98,12 @@ class HighlightOut:
                         "penalties",
                         "boundaryDecision",
                         "sources",
+                        "profileScore",
+                        "profileVersionId",
+                        "matchedKeywords",
+                        "matchedPhrases",
+                        "audioPeakPosition",
+                        "duplicateWarning",
                     )
                 }
             )
@@ -149,43 +159,61 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
     if not inputs.chat_events:
         notes.append("No chat track available — chat score will be zero.")
 
-    progress(0.65, "generating candidate windows")
-    t0 = _tick()
-    local_candidates = generate_candidates(
-        inputs.segments,
-        audio=audio_series,
-        chat=chat_density,
-        min_seconds=inputs.min_clip_seconds,
-        max_seconds=inputs.max_clip_seconds,
-        target_count=inputs.top_n,
-    )
-    timings["candidate_generation"] = int((_tick() - t0) * 1000)
-
+    rw = inputs.ranking_weights or RankingWeights()
     visual_segments = list(inputs.visual_segments or [])
     fusion_used = False
-    t0 = _tick()
-    if visual_segments:
-        fusion_used = True
-        progress(0.72, "fusing local + TwelveLabs visual candidates")
-        fused = fuse_highlight_candidates(
-            local_candidates,
-            visual_segments,
+    local_candidates: list[Candidate] = []
+
+    if inputs.pre_scored_candidates:
+        progress(0.65, "using profile-scored candidates")
+        candidates = list(inputs.pre_scored_candidates)
+        local_candidates = candidates
+        notes.append(
+            f"Profile scoring: {len(candidates)} candidates "
+            f"(version {inputs.profile_version_id or 'unknown'})."
+        )
+        timings["candidate_generation"] = 0
+        timings["candidate_fusion"] = 0
+    else:
+        progress(0.65, "generating candidate windows")
+        t0 = _tick()
+        local_candidates = generate_candidates(
+            inputs.segments,
             audio=audio_series,
             chat=chat_density,
-            scene_cuts=scene_cuts,
-            min_clip_seconds=inputs.min_clip_seconds,
-            max_clip_seconds=inputs.max_clip_seconds,
+            min_seconds=inputs.min_clip_seconds,
+            max_seconds=inputs.max_clip_seconds,
+            target_count=inputs.top_n,
+            weights=rw,
         )
-        candidates = [f.to_candidate() for f in fused]
-        notes.append(
-            f"TwelveLabs fusion: {len(visual_segments)} visual segments, "
-            f"{len(candidates)} fused candidates."
-        )
-    else:
-        candidates = local_candidates
-        if inputs.twelvelabs_used:
-            notes.append("TwelveLabs enabled but no visual segments available — local only.")
-    timings["candidate_fusion"] = int((_tick() - t0) * 1000)
+        timings["candidate_generation"] = int((_tick() - t0) * 1000)
+
+        t0 = _tick()
+        if visual_segments:
+            fusion_used = True
+            progress(0.72, "fusing local + TwelveLabs visual candidates")
+            fused = fuse_highlight_candidates(
+                local_candidates,
+                visual_segments,
+                audio=audio_series,
+                chat=chat_density,
+                scene_cuts=scene_cuts,
+                min_clip_seconds=inputs.min_clip_seconds,
+                max_clip_seconds=inputs.max_clip_seconds,
+                weights=rw,
+            )
+            candidates = [f.to_candidate() for f in fused]
+            notes.append(
+                f"TwelveLabs fusion: {len(visual_segments)} visual segments, "
+                f"{len(candidates)} fused candidates."
+            )
+        else:
+            candidates = local_candidates
+            if inputs.twelvelabs_used:
+                notes.append(
+                    "TwelveLabs enabled but no visual segments available — local only."
+                )
+        timings["candidate_fusion"] = int((_tick() - t0) * 1000)
 
     log.info(
         "candidates_generated",
@@ -265,6 +293,7 @@ def analyze_project(inputs: AnalysisInput, *, progress: ProgressCb) -> AnalysisO
         pre_roll_seconds=inputs.pre_roll_seconds,
         tail_padding_seconds=inputs.tail_padding_seconds,
         max_clip_seconds=inputs.max_clip_seconds,
+        ranking_weights=rw,
     )
     timings["highlights_build"] = int((_tick() - t0) * 1000)
 
@@ -295,6 +324,7 @@ def _build_highlights(
     pre_roll_seconds: float,
     tail_padding_seconds: float,
     max_clip_seconds: float,
+    ranking_weights: RankingWeights | None = None,
 ) -> list[HighlightOut]:
     out: list[HighlightOut] = []
 
@@ -325,7 +355,12 @@ def _build_highlights(
                 segments=segments,
             )
 
-            composite = 0.55 * pick.llm_score + 0.45 * c.composite_score
+            rw = ranking_weights or RankingWeights()
+            composite = (
+                rw.gemini_blend_llm * pick.llm_score
+                + rw.gemini_blend_local
+                * (getattr(c, "fusion_score", 0.0) or c.composite_score)
+            )
             explanation = pick.summary or ""
             if pick.boundary_reason:
                 explanation = (explanation + "\n\n" + pick.boundary_reason).strip()

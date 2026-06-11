@@ -21,6 +21,7 @@ from typing import Any, Literal
 
 from .audio_features import AudioFeatureSeries
 from .chat_features import ChatDensitySeries
+from .ranking_weights import RankingWeights
 from .signal_peaks import find_peak_indices
 
 # Light keyword signal — these phrases tend to mark interesting moments.
@@ -327,11 +328,15 @@ def generate_candidates(
     min_seconds: float,
     max_seconds: float,
     target_count: int,
+    weights: RankingWeights | None = None,
 ) -> list[Candidate]:
     """Generate candidates from transcript, audio peaks, and chat peaks."""
+    w_cfg = weights or RankingWeights()
     has_chat = bool(chat and chat.total_messages > 0)
     w_audio, w_chat, w_keyword = (
-        (0.45, 0.40, 0.15) if has_chat else (0.75, 0.0, 0.25)
+        (w_cfg.candidate_chat_audio, w_cfg.candidate_chat, w_cfg.candidate_keyword)
+        if has_chat
+        else (w_cfg.candidate_audio, 0.0, w_cfg.candidate_keyword)
     )
 
     candidates: list[Candidate] = []

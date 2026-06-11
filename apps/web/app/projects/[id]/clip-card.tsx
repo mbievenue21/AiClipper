@@ -45,7 +45,9 @@ import {
   defaultCaptionStyleState,
 } from "./caption-style-picker";
 import { ScheduleUploadDialog, type AccountOption } from "./schedule-upload-dialog";
-import type { GeneratedUploadMetadata } from "@/lib/db/schema";
+import type { GeneratedUploadMetadata, HighlightReason } from "@/lib/db/schema";
+
+import { ClipFeedbackPanel } from "./clip-feedback-panel";
 
 export type ClipVersionData = {
   id: string;
@@ -88,6 +90,14 @@ export type ClipCardData = {
     externalUrl: string | null;
     errorMessage: string | null;
   }[];
+  highlightStart: number;
+  highlightEnd: number;
+  sourceStart: number | null;
+  sourceEnd: number | null;
+  reason: HighlightReason | null;
+  learnedPreRoll: number;
+  feedbackCount: number;
+  hasFeedback: boolean;
 };
 
 export function ClipCard({
@@ -189,6 +199,27 @@ export function ClipCard({
           <pre className="max-h-32 overflow-auto rounded-md bg-destructive/10 p-2 text-[11px] text-destructive whitespace-pre-wrap">
             {clip.errorMessage}
           </pre>
+        )}
+
+        {clip.status === "ready" && !isBusy && !clip.hasFeedback && (
+          <ClipFeedbackPanel
+            projectId={projectId}
+            clipId={clip.id}
+            highlightId={clip.highlightId}
+            highlightStart={clip.highlightStart}
+            highlightEnd={clip.highlightEnd}
+            sourceStart={clip.sourceStart}
+            sourceEnd={clip.sourceEnd}
+            reason={clip.reason}
+            learnedPreRoll={clip.learnedPreRoll}
+            feedbackCount={clip.feedbackCount}
+          />
+        )}
+        {clip.status === "ready" && !isBusy && clip.hasFeedback && (
+          <p className="text-xs text-muted-foreground">
+            Feedback recorded. Learned pre-roll default: {clip.learnedPreRoll}s (
+            {clip.feedbackCount} samples).
+          </p>
         )}
 
         {clip.uploads.length > 0 && (

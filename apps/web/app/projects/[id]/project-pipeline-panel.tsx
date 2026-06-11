@@ -7,9 +7,12 @@ import { cn } from "@/lib/utils";
 const JOB_LABELS: Record<string, string> = {
   ingest: "Downloading video",
   transcribe: "Transcribing audio",
+  feature_extract: "Extracting features",
+  candidate_generate: "Generating candidates",
+  profile_score: "Profile scoring",
   twelvelabs_index: "TwelveLabs — indexing video",
   twelvelabs_analyze: "TwelveLabs — visual analysis",
-  analyze: "Fusion + Gemini rerank",
+  analyze: "Gemini rerank + highlights",
   render: "Rendering clip",
   caption: "Burning captions",
   reedit: "Saving clip edits",
@@ -38,6 +41,12 @@ const TL_STAGES = [
   { id: "tl_analyze", label: "TL Visual" },
 ] as const;
 
+const PROFILE_STAGES = [
+  { id: "feature_extract", label: "Features" },
+  { id: "candidate_generate", label: "Candidates" },
+  { id: "profile_score", label: "Profile" },
+] as const;
+
 const TAIL_STAGES = [
   { id: "analyze", label: "Analyze" },
   { id: "highlights", label: "Highlights" },
@@ -47,6 +56,7 @@ const TAIL_STAGES = [
 type StageId =
   | (typeof BASE_STAGES)[number]["id"]
   | (typeof TL_STAGES)[number]["id"]
+  | (typeof PROFILE_STAGES)[number]["id"]
   | (typeof TAIL_STAGES)[number]["id"];
 
 function stageStates(input: {
@@ -108,6 +118,36 @@ function stageStates(input: {
           ? "upcoming"
           : "upcoming";
 
+  const feature_extract: StageState =
+    activeJobTypes.has("feature_extract")
+      ? "active"
+      : activeJobTypes.has("candidate_generate") ||
+          activeJobTypes.has("profile_score") ||
+          activeJobTypes.has("analyze") ||
+          highlightCount > 0
+        ? "done"
+        : transcribe === "done"
+          ? "upcoming"
+          : "upcoming";
+
+  const candidate_generate: StageState = activeJobTypes.has("candidate_generate")
+    ? "active"
+    : activeJobTypes.has("profile_score") ||
+        activeJobTypes.has("analyze") ||
+        highlightCount > 0
+      ? "done"
+      : feature_extract === "done"
+        ? "upcoming"
+        : "upcoming";
+
+  const profile_score: StageState = activeJobTypes.has("profile_score")
+    ? "active"
+    : activeJobTypes.has("analyze") || highlightCount > 0
+      ? "done"
+      : candidate_generate === "done"
+        ? "upcoming"
+        : "upcoming";
+
   const analyze: StageState =
     projectStatus === "analyzing" || activeJobTypes.has("analyze")
       ? "active"
@@ -119,9 +159,11 @@ function stageStates(input: {
             : transcribe === "done"
               ? "upcoming"
               : "upcoming"
-          : transcribe === "done"
+          : profile_score === "done"
             ? "upcoming"
-            : "upcoming";
+            : transcribe === "done"
+              ? "upcoming"
+              : "upcoming";
 
   const highlights: StageState =
     highlightCount > 0
@@ -141,7 +183,18 @@ function stageStates(input: {
           ? "upcoming"
           : "upcoming";
 
-  return { ingest, transcribe, tl_index, tl_analyze, analyze, highlights, render };
+  return {
+    ingest,
+    transcribe,
+    tl_index,
+    tl_analyze,
+    feature_extract,
+    candidate_generate,
+    profile_score,
+    analyze,
+    highlights,
+    render,
+  };
 }
 
 export function ProjectPipelinePanel({
@@ -184,7 +237,7 @@ export function ProjectPipelinePanel({
 
   const stages = [
     ...BASE_STAGES,
-    ...(twelvelabsEnabled ? TL_STAGES : []),
+    ...(twelvelabsEnabled ? TL_STAGES : PROFILE_STAGES),
     ...TAIL_STAGES,
   ];
 

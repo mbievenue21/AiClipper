@@ -140,6 +140,18 @@ class Settings(BaseSettings):
     youtube_client_id: str = Field(default="", alias="YOUTUBE_CLIENT_ID")
     youtube_client_secret: str = Field(default="", alias="YOUTUBE_CLIENT_SECRET")
 
+    # ---- Highlight profile training ---------------------------------------
+    profile_embeddings_enabled: bool = Field(
+        default=True, alias="PROFILE_EMBEDDINGS_ENABLED"
+    )
+    profile_embedding_model: str = Field(
+        default="all-MiniLM-L6-v2", alias="PROFILE_EMBEDDING_MODEL"
+    )
+    profile_ocr_enabled: bool = Field(default=False, alias="PROFILE_OCR_ENABLED")
+    profile_vlm_enabled: bool = Field(default=False, alias="PROFILE_VLM_ENABLED")
+    profile_ranker_enabled: bool = Field(default=True, alias="PROFILE_RANKER_ENABLED")
+    whisperx_enabled: bool = Field(default=False, alias="WHISPERX_ENABLED")
+
     # ---- Job loop tuning --------------------------------------------------
     job_poll_interval_seconds: float = Field(default=1.0)
     job_max_concurrent: int = Field(default=1)  # raise if you have multiple GPUs
